@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('Styles'); ?>
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header__inner">
+      <h1 class="app-title"><?= appTitle ?></h1>
+      <button type="button" id="categoryBadge" class="badge" hidden></button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 読み込み中 -->
+    <section id="viewLoading" class="view">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="muted center">読み込み中…</p>
+    </section>
+
+    <!-- エラー -->
+    <section id="viewError" class="view" hidden>
+      <div class="card">
+        <h2>読み込みに失敗しました</h2>
+        <p id="errorText" class="muted"></p>
+        <button type="button" class="btn" onclick="location.reload()">再読み込み</button>
+      </div>
+    </section>
+
+    <!-- STEP1 所属区分 -->
+    <section id="viewCategory" class="view" hidden>
+      <p class="step">STEP 1 / 2</p>
+      <h2 class="view-title">所属区分を選んでください</h2>
+      <div id="categoryList" class="category-list"></div>
+    </section>
+
+    <!-- STEP2 入力フォーム -->
+    <section id="viewForm" class="view" hidden>
+      <p class="step">STEP 2 / 2</p>
+      <h2 class="view-title">経費の内容を入力してください</h2>
+      <form id="expenseForm" novalidate>
+        <div id="fieldList"></div>
+        <div id="calcBox" class="calc" hidden></div>
+        <div id="formErrors" class="alert" role="alert" hidden></div>
+        <div class="actions">
+          <button type="button" class="btn btn--ghost" id="backToCategory">戻る</button>
+          <button type="submit" class="btn btn--primary" id="submitBtn">申請する</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 完了 -->
+    <section id="viewDone" class="view" hidden>
+      <div class="card center">
+        <div class="done-icon" aria-hidden="true">✓</div>
+        <h2>申請を受け付けました</h2>
+        <p id="doneText" class="muted"></p>
+        <div class="actions actions--stack">
+          <button type="button" class="btn btn--primary" id="againSame">続けて申請する（支払者はそのまま）</button>
+          <button type="button" class="btn btn--ghost" id="againNew">最初から申請する</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="overlay" class="overlay" hidden>
+    <div class="overlay__box">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="overlayText">送信中…</p>
+    </div>
+  </div>
+
+  <?!= include_('App'); ?>
+</body>
+</html>

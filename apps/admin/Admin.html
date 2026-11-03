@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('AdminStyles'); ?>
+</head>
+<body>
+  <!-- ログイン -->
+  <section id="loginView" class="login" hidden>
+    <form id="loginForm" class="card login__card">
+      <h1>経費申請 管理画面</h1>
+      <p class="muted">管理者パスワードを入力してください</p>
+      <label class="sr-only" for="loginPassword">パスワード</label>
+      <input type="password" id="loginPassword" autocomplete="current-password" placeholder="パスワード" required>
+      <div id="loginError" class="alert" hidden></div>
+      <button class="btn btn--primary" type="submit">ログイン</button>
+    </form>
+  </section>
+
+  <!-- 本体 -->
+  <div id="appView" hidden>
+    <header class="topbar">
+      <div class="topbar__brand">経費申請 管理画面</div>
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="dashboard" role="tab">ダッシュボード</button>
+        <button class="tab" data-tab="records" role="tab">申請一覧</button>
+        <button class="tab" data-tab="freee" role="tab">freee連携</button>
+        <button class="tab" data-tab="form" role="tab">フォーム編集</button>
+        <button class="tab" data-tab="masters" role="tab">マスタ</button>
+        <button class="tab" data-tab="settings" role="tab">設定</button>
+      </nav>
+      <div class="topbar__right">
+        <span id="whoami" class="muted small"></span>
+        <button class="btn btn--sm" id="logoutBtn">ログアウト</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- ダッシュボード -->
+      <section class="panel" id="tab-dashboard">
+        <div class="filters">
+          <label>期間 <input type="month" id="dFrom"></label>
+          <span>〜</span>
+          <label><input type="month" id="dTo"></label>
+          <label>所属区分 <select id="dCategory"></select></label>
+          <div class="quick">
+            <button class="chip" data-range="this">今月</button>
+            <button class="chip" data-range="last">先月</button>
+            <button class="chip" data-range="6m">直近6ヶ月</button>
+            <button class="chip" data-range="fy">今年</button>
+          </div>
+        </div>
+        <div class="kpis" id="kpis"></div>
+        <div class="grid2">
+          <div class="card">
+            <h2 class="card__title">月別の経費（所属区分別）</h2>
+            <div id="monthlyLegend" class="legend"></div>
+            <div class="chart-box"><canvas id="chartMonthly" aria-label="月別経費の棒グラフ"></canvas></div>
+          </div>
+          <div class="card">
+            <h2 class="card__title">勘定科目別</h2>
+            <div class="chart-box"><canvas id="chartAccount" aria-label="勘定科目別の棒グラフ"></canvas></div>
+          </div>
+        </div>
+        <div class="card">
+          <h2 class="card__title">申請者別（誰がどれくらい使っているか）</h2>
+          <div class="grid2 grid2--flat">
+            <div class="chart-box chart-box--tall"><canvas id="chartPayer" aria-label="申請者別の棒グラフ"></canvas></div>
+            <div class="table-wrap"><table class="table" id="payerTable"></table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 申請一覧 -->
+      <section class="panel" id="tab-records" hidden>
+        <div class="filters">
+          <label>支払日 <input type="date" id="rFrom"></label>
+          <span>〜</span>
+          <label><input type="date" id="rTo"></label>
+          <label>所属区分 <select id="rCategory"></select></label>
+          <label>ステータス <select id="rStatus"></select></label>
+          <label class="grow">検索 <input type="search" id="rQuery" placeholder="氏名・支払先・内容・申請ID"></label>
+          <button class="btn btn--sm" id="rSearch">検索</button>
+        </div>
+        <div class="bulkbar">
+          <span id="rSummary" class="muted"></span>
+          <div class="bulkbar__actions">
+            <button class="btn btn--sm btn--primary" id="bulkApprove" disabled>選択を承認</button>
+            <button class="btn btn--sm" id="bulkReject" disabled>選択を差戻し</button>
+            <button class="btn btn--sm" id="bulkPending" disabled>申請中に戻す</button>
+          </div>
+        </div>
+        <div class="table-wrap card card--flush"><table class="table table--hover" id="recordTable"></table></div>
+      </section>
+
+      <!-- freee連携 -->
+      <section class="panel" id="tab-freee" hidden>
+        <div class="grid2">
+          <div class="card">
+            <h2 class="card__title">方式A：CSVで取り込む（おすすめ）</h2>
+            <p class="muted small">「承認済」の申請を freee会計の［取引の一覧・登録 → 取引のインポート］用CSVで出力します。</p>
+            <div class="form-grid">
+              <label>支払日（から）<input type="date" id="fFrom"></label>
+              <label>支払日（まで）<input type="date" id="fTo"></label>
+              <label>所属区分 <select id="fCategory"></select></label>
+              <label class="check"><input type="checkbox" id="fMark" checked> 出力した申請を「freee連携済」にする</label>
+              <label class="check"><input type="checkbox" id="fIncludeExported"> 連携済も含めて再出力する</label>
+            </div>
+            <button class="btn btn--primary" id="csvBtn">CSVを出力</button>
+            <div id="csvResult" class="result" hidden></div>
+          </div>
+          <div class="card">
+            <h2 class="card__title">方式B：freee APIで直接登録</h2>
+            <p class="muted small">取引の登録と同時に、領収書画像を freee のファイルボックスに証憑として添付します。</p>
+            <div id="freeeStatus" class="result"></div>
+            <details class="details">
+              <summary>freeeアプリの登録（初回のみ）</summary>
+              <ol class="small">
+                <li>freee アプリストアの「開発者向け」で新しいアプリを作成</li>
+                <li>コールバックURLに下記を登録：<br><code id="redirectUri"></code></li>
+                <li>権限：取引・証憑・勘定科目・税区分・部門 の参照/更新</li>
+                <li>発行された Client ID / Secret を入力して保存</li>
+              </ol>
+              <div class="form-grid">
+                <label>Client ID <input type="text" id="fClientId" autocomplete="off"></label>
+                <label>Client Secret <input type="password" id="fClientSecret" autocomplete="off"></label>
+              </div>
+              <button class="btn btn--sm" id="saveClientBtn">保存</button>
+            </details>
+            <div class="btn-row">
+              <button class="btn" id="connectBtn">freeeと連携する</button>
+              <button class="btn" id="syncBtn">マスタ同期（科目ID・税区分）</button>
+              <button class="btn btn--primary" id="sendBtn">承認済をfreeeに登録</button>
+            </div>
+            <div id="apiResult" class="result" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- フォーム編集 -->
+      <section class="panel" id="tab-form" hidden>
+        <div class="card">
+          <div class="card__head">
+            <h2 class="card__title">申請フォームの項目</h2>
+            <div class="btn-row">
+              <a class="btn btn--sm" id="previewLink" target="_blank" rel="noopener">申請画面を開く</a>
+              <button class="btn btn--sm" id="addFieldBtn">＋ 項目を追加</button>
+              <button class="btn btn--sm btn--primary" id="saveFieldsBtn">保存</button>
+            </div>
+          </div>
+          <p class="muted small">🔒 の項目はfreee連携に必要なため、無効化・任意化できません。並び順は ↑↓ で変更できます。保存するとすぐに申請画面へ反映されます。</p>
+          <div id="fieldEditor"></div>
+        </div>
+      </section>
+
+      <!-- マスタ -->
+      <section class="panel" id="tab-masters" hidden>
+        <div class="subtabs">
+          <button class="chip is-active" data-master="accounts">勘定科目</button>
+          <button class="chip" data-master="taxes">税区分</button>
+          <button class="chip" data-master="categories">所属区分</button>
+        </div>
+        <div class="card">
+          <div class="card__head">
+            <h2 class="card__title" id="masterTitle"></h2>
+            <div class="btn-row">
+              <button class="btn btn--sm" id="addMasterRow">＋ 行を追加</button>
+              <button class="btn btn--sm btn--primary" id="saveMaster">保存</button>
+            </div>
+          </div>
+          <p class="muted small" id="masterHelp"></p>
+          <div class="table-wrap"><table class="table table--edit" id="masterTable"></table></div>
+        </div>
+      </section>
+
+      <!-- 設定 -->
+      <section class="panel" id="tab-settings" hidden>
+        <div class="grid2">
+          <div class="card">
+            <div class="card__head">
+              <h2 class="card__title">保存先・連携設定</h2>
+              <div class="btn-row">
+                <button class="btn btn--sm" id="testBtn">接続テスト</button>
+                <button class="btn btn--sm btn--primary" id="saveSettingsBtn">保存</button>
+              </div>
+            </div>
+            <div id="testResult" class="result" hidden></div>
+            <div id="settingsForm" class="settings"></div>
+          </div>
+          <div>
+            <div class="card">
+              <h2 class="card__title">パスワード変更</h2>
+              <div class="form-grid">
+                <label>現在のパスワード <input type="password" id="pwCurrent" autocomplete="current-password"></label>
+                <label>新しいパスワード（8文字以上）<input type="password" id="pwNext" autocomplete="new-password"></label>
+              </div>
+              <button class="btn btn--sm" id="pwBtn">変更する</button>
+            </div>
+            <div class="card">
+              <h2 class="card__title">管理者アカウント制限（任意）</h2>
+              <p class="muted small">Googleアカウントのメールアドレスを入れると、パスワードに加えてそのアカウントでしか管理画面を開けなくなります（カンマ区切り・空欄で制限なし）。</p>
+              <textarea id="adminEmails" rows="3"></textarea>
+              <button class="btn btn--sm" id="adminEmailsBtn">保存</button>
+            </div>
+            <div class="card">
+              <h2 class="card__title">リンク</h2>
+              <ul class="links">
+                <li><a id="homeLink" target="_blank" rel="noopener">経費DBスプレッドシート</a></li>
+                <li><a id="applicantLink" target="_blank" rel="noopener">申請者用画面</a></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 詳細モーダル -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal__head">
+        <h2 id="modalTitle">申請の詳細</h2>
+        <button class="btn btn--sm btn--ghost" id="modalClose" aria-label="閉じる">✕</button>
+      </div>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <div id="busy" class="busy" hidden><div class="spinner"></div></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <?!= include_('AdminApp'); ?>
+</body>
+</html>
