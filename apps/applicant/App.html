@@ -1,0 +1,409 @@
+<script>
+(function () {
+  'use strict';
+
+  var state = { boot: null, category: null, files: [], taxTouched: false };
+  var $ = function (id) { return document.getElementById(id); };
+  var STORE_KEY = 'expense-app:last';
+
+  /* ---------- サーバー呼び出し（ローカル確認用のモック付き） ---------- */
+  function call(fn, arg) {
+    return new Promise(function (resolve, reject) {
+      if (window.google && google.script && google.script.run) {
+        google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](arg);
+      } else if (window.__MOCK__ && window.__MOCK__[fn]) {
+        setTimeout(function () { try { resolve(window.__MOCK__[fn](arg)); } catch (e) { reject(e); } }, 300);
+      } else {
+        reject(new Error('Google Apps Script 環境で開いてください'));
+      }
+    });
+  }
+
+  function remember(patch) {
+    try {
+      var cur = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+      Object.keys(patch).forEach(function (k) { cur[k] = patch[k]; });
+      localStorage.setItem(STORE_KEY, JSON.stringify(cur));
+    } catch (e) { /* 保存できない環境は無視 */ }
+  }
+  function recall() {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (e) { return {}; }
+  }
+
+  function show(viewId) {
+    ['viewLoading', 'viewError', 'viewCategory', 'viewForm', 'viewDone'].forEach(function (id) {
+      $(id).hidden = id !== viewId;
+    });
+    window.scrollTo(0, 0);
+  }
+
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      if (k === 'text') e.textContent = attrs[k];
+      else if (k === 'class') e.className = attrs[k];
+      else if (k.indexOf('on') === 0) e.addEventListener(k.slice(2), attrs[k]);
+      else if (attrs[k] !== false && attrs[k] != null) e.setAttribute(k, attrs[k] === true ? '' : attrs[k]);
+    });
+    (children || []).forEach(function (c) { if (c) e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return e;
+  }
+
+  function matchesCategory(list, cat) {
+    return !list || !list.length || list.indexOf('ALL') >= 0 || list.indexOf(cat) >= 0;
+  }
+
+  function yen(n) { return '¥' + Number(n || 0).toLocaleString('ja-JP'); }
+
+  /* ---------- 初期化 ---------- */
+  call('api_bootstrap').then(function (boot) {
+    state.boot = boot;
+    renderCategories();
+    var last = recall();
+    var hasLast = boot.categories.some(function (c) { return c.name === last.category; });
+    if (boot.categories.length === 1) selectCategory(boot.categories[0].name);
+    else if (hasLast && location.hash !== '#category') selectCategory(last.category);
+    else show('viewCategory');
+  }).catch(function (err) {
+    $('errorText').textContent = err && err.message ? err.message : String(err);
+    show('viewError');
+  });
+
+  /* ---------- STEP1 所属区分 ---------- */
+  function renderCategories() {
+    var list = $('categoryList');
+    list.innerHTML = '';
+    state.boot.categories.forEach(function (c) {
+      var btn = el('button', { type: 'button', class: 'category-card', onclick: function () { selectCategory(c.name); } }, [
+        el('span', { class: 'category-card__name', text: c.name }),
+        el('span', { class: 'category-card__desc', text: c.description || '' })
+      ]);
+      if (c.color) btn.style.setProperty('--cat-color', c.color);
+      list.appendChild(btn);
+    });
+  }
+
+  function selectCategory(name) {
+    state.category = state.boot.categories.filter(function (c) { return c.name === name; })[0];
+    remember({ category: name });
+    var badge = $('categoryBadge');
+    badge.textContent = name;
+    badge.title = '所属区分を変更';
+    badge.style.setProperty('--badge-color', state.category.color || '');
+    badge.hidden = false;
+    renderForm({});
+    show('viewForm');
+  }
+
+  $('categoryBadge').addEventListener('click', function () { $('categoryBadge').hidden = true; show('viewCategory'); });
+  $('backToCategory').addEventListener('click', function () { $('categoryBadge').hidden = true; show('viewCategory'); });
+
+  /* ---------- STEP2 入力フォーム ---------- */
+  function visibleFields() {
+    return state.boot.fields.filter(function (f) { return matchesCategory(f.categories, state.category.name); });
+  }
+
+  function renderForm(keep) {
+    var cat = state.category.name;
+    var boot = state.boot;
+    var list = $('fieldList');
+    list.innerHTML = '';
+    state.files = [];
+    state.taxTouched = false;
+    $('formErrors').hidden = true;
+
+    visibleFields().forEach(function (f) {
+      var id = 'f_' + f.key;
+      var wrap = el('div', { class: 'field', 'data-key': f.key, id: 'wrap_' + f.key });
+      var labelTag = (f.type === 'radio' || f.type === 'tax' || f.type === 'file') ? 'div' : 'label';
+      wrap.appendChild(el(labelTag, { class: 'field__label', for: labelTag === 'label' ? id : null }, [
+        f.label, f.required ? el('span', { class: 'req', text: '必須' }) : null
+      ]));
+      if (f.help) wrap.appendChild(el('p', { class: 'field__help', text: f.help }));
+
+      var input;
+      switch (f.type) {
+        case 'date':
+          input = el('input', { type: 'date', id: id, name: f.key, max: boot.today, value: keep[f.key] || boot.today });
+          break;
+        case 'number':
+          input = el('input', { type: 'text', inputmode: 'numeric', id: id, name: f.key, placeholder: f.placeholder || '', autocomplete: 'off' });
+          if (f.key === 'amount') input = el('div', { class: 'yen' }, [input]);
+          break;
+        case 'textarea':
+          input = el('textarea', { id: id, name: f.key, placeholder: f.placeholder || '' });
+          break;
+        case 'employee':
+          input = el('select', { id: id, name: f.key });
+          var emps = boot.employees.filter(function (e) { return e.category === cat; });
+          if (!emps.length) emps = boot.employees; // 部署が未設定の場合は全員を表示
+          input.appendChild(el('option', { value: '', text: emps.length ? '選択してください' : '従業員が見つかりません' }));
+          emps.forEach(function (e) {
+            input.appendChild(el('option', { value: e.id, text: e.name === e.id ? e.id : e.name + '（' + e.id + '）' }));
+          });
+          var lastPayer = keep[f.key] || (recall().payer || {})[cat];
+          if (lastPayer) input.value = lastPayer;
+          if (boot.employeeError) wrap.appendChild(el('p', { class: 'field__error', text: '従業員マスタの読み込みに失敗：' + boot.employeeError }));
+          break;
+        case 'account':
+          input = el('select', { id: id, name: f.key, onchange: onAccountChange });
+          input.appendChild(el('option', { value: '', text: '選択してください' }));
+          boot.accounts.filter(function (a) { return matchesCategory(a.categories, cat); }).forEach(function (a) {
+            input.appendChild(el('option', { value: a.label, text: a.label }));
+          });
+          break;
+        case 'select':
+          input = el('select', { id: id, name: f.key });
+          input.appendChild(el('option', { value: '', text: '選択してください' }));
+          f.options.forEach(function (o) { input.appendChild(el('option', { value: o, text: o })); });
+          if (f.key === 'paymentMethod' && f.options.length) input.value = f.options[0];
+          break;
+        case 'radio':
+        case 'tax':
+          var opts = f.type === 'tax' ? boot.taxes.map(function (t) { return t.label; }) : f.options;
+          input = el('div', { class: 'choices', role: 'radiogroup' });
+          opts.forEach(function (o, i) {
+            input.appendChild(el('label', { class: 'choice' }, [
+              el('input', { type: 'radio', name: f.key, value: o, id: id + '_' + i,
+                onchange: f.type === 'tax' ? function () { state.taxTouched = true; updateCalc(); } : onRadioChange }),
+              el('span', { text: o })
+            ]));
+          });
+          break;
+        case 'file':
+          input = buildDropzone(id);
+          break;
+        default:
+          input = el('input', { type: 'text', id: id, name: f.key, placeholder: f.placeholder || '', autocomplete: 'off' });
+      }
+      wrap.appendChild(input);
+      wrap.appendChild(el('div', { class: 'field__error', hidden: true }));
+      list.appendChild(wrap);
+    });
+
+    var amount = $('f_amount');
+    if (amount) amount.addEventListener('input', updateCalc);
+    onRadioChange();
+    updateCalc();
+  }
+
+  function getValue(key) {
+    var checked = document.querySelector('input[name="' + key + '"]:checked');
+    if (checked) return checked.value;
+    var input = document.querySelector('#fieldList [name="' + key + '"]:not([type=radio])');
+    return input ? input.value.trim() : '';
+  }
+  function setRadio(key, value) {
+    var r = document.querySelector('input[name="' + key + '"][value="' + CSS.escape(value) + '"]');
+    if (r) r.checked = true;
+  }
+
+  function onAccountChange(e) {
+    var acc = state.boot.accounts.filter(function (a) { return a.label === e.target.value; })[0];
+    if (acc && acc.defaultTax && !state.taxTouched) setRadio('taxRateLabel', acc.defaultTax);
+    updateCalc();
+  }
+
+  /** 適格請求書「あり」のときだけ登録番号欄を表示 */
+  function onRadioChange() {
+    var wrap = $('wrap_invoiceNumber');
+    if (!wrap || !$('wrap_invoiceType')) return;
+    wrap.hidden = getValue('invoiceType') !== state.boot.invoiceQualified;
+  }
+
+  function parseAmount(v) { return Number(String(v || '').replace(/[,，円¥\s]/g, '')); }
+
+  function updateCalc() {
+    var box = $('calcBox');
+    var amount = parseAmount(getValue('amount'));
+    var taxLabel = getValue('taxRateLabel');
+    var tax = state.boot.taxes.filter(function (t) { return t.label === taxLabel; })[0];
+    if (!(amount > 0) || !tax) { box.hidden = true; return; }
+    var raw = amount * tax.rate / (100 + tax.rate);
+    var r = state.boot.taxRounding;
+    var t = r === '四捨五入' ? Math.round(raw) : r === '切り上げ' ? Math.ceil(raw) : Math.floor(raw);
+    box.innerHTML = '';
+    box.appendChild(el('span', {}, ['税込 ', el('strong', { text: yen(amount) })]));
+    box.appendChild(el('span', { class: 'muted', text: '税抜 ' + yen(amount - t) + ' ／ 消費税 ' + yen(t) }));
+    box.hidden = false;
+  }
+
+  /* ---------- 領収書アップロード ---------- */
+  function buildDropzone(id) {
+    var input = el('input', { type: 'file', id: id, accept: 'image/*,application/pdf', multiple: true, hidden: true });
+    var zone = el('div', { class: 'dropzone', tabindex: '0', role: 'button', 'aria-label': 'レシートを追加' }, [
+      el('div', { class: 'dropzone__main', text: '📷 タップして撮影・ファイルを選択' }),
+      el('div', { class: 'muted', text: '画像またはPDF（複数可）' })
+    ]);
+    var thumbs = el('div', { class: 'thumbs', id: 'thumbs' });
+    zone.addEventListener('click', function () { input.click(); });
+    zone.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+    zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('is-over'); });
+    zone.addEventListener('dragleave', function () { zone.classList.remove('is-over'); });
+    zone.addEventListener('drop', function (e) { e.preventDefault(); zone.classList.remove('is-over'); addFiles(e.dataTransfer.files); });
+    input.addEventListener('change', function () { addFiles(input.files); input.value = ''; });
+    return el('div', {}, [input, zone, thumbs]);
+  }
+
+  function addFiles(fileList) {
+    var maxBytes = state.boot.maxFileMb * 1024 * 1024;
+    Array.prototype.forEach.call(fileList, function (file) {
+      if (!/^image\/|^application\/pdf$/.test(file.type)) { alert(file.name + '：画像またはPDFを選択してください'); return; }
+      var item = { name: file.name, mimeType: file.type, data: null, preview: null, loading: true };
+      state.files.push(item);
+      renderThumbs();
+      prepareFile(file).then(function (res) {
+        if (res.data.length * 0.75 > maxBytes) {
+          alert(file.name + '：' + state.boot.maxFileMb + 'MBを超えています');
+          state.files.splice(state.files.indexOf(item), 1);
+        } else {
+          item.data = res.data; item.mimeType = res.mimeType; item.name = res.name; item.preview = res.preview;
+        }
+        item.loading = false;
+        renderThumbs();
+      }).catch(function () {
+        alert(file.name + '：読み込めませんでした');
+        state.files.splice(state.files.indexOf(item), 1);
+        renderThumbs();
+      });
+    });
+  }
+
+  /** 画像は長辺2000pxのJPEGに縮小して送信量を抑える（スマホ写真対策） */
+  function prepareFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = function () {
+        var dataUrl = reader.result;
+        if (!/^image\/(jpeg|png|webp|heic|heif)/.test(file.type)) {
+          resolve({ data: dataUrl.split(',')[1], mimeType: file.type, name: file.name, preview: file.type.indexOf('image/') === 0 ? dataUrl : null });
+          return;
+        }
+        var img = new Image();
+        img.onerror = function () { resolve({ data: dataUrl.split(',')[1], mimeType: file.type, name: file.name, preview: null }); };
+        img.onload = function () {
+          var max = 2000, w = img.naturalWidth, h = img.naturalHeight;
+          if (file.size < 800 * 1024 && Math.max(w, h) <= max) {
+            resolve({ data: dataUrl.split(',')[1], mimeType: file.type, name: file.name, preview: dataUrl });
+            return;
+          }
+          var scale = Math.min(1, max / Math.max(w, h));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale);
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          var out = canvas.toDataURL('image/jpeg', 0.85);
+          resolve({ data: out.split(',')[1], mimeType: 'image/jpeg', name: file.name.replace(/\.[^.]+$/, '') + '.jpg', preview: out });
+        };
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function renderThumbs() {
+    var box = $('thumbs');
+    if (!box) return;
+    box.innerHTML = '';
+    state.files.forEach(function (f, i) {
+      var t = el('div', { class: 'thumb', title: f.name }, [
+        f.loading ? '処理中…' : (f.preview ? el('img', { src: f.preview, alt: f.name }) : '📄 ' + f.name),
+        el('button', { type: 'button', class: 'thumb__remove', 'aria-label': f.name + 'を削除', text: '×',
+          onclick: function () { state.files.splice(i, 1); renderThumbs(); } })
+      ]);
+      box.appendChild(t);
+    });
+  }
+
+  /* ---------- 送信 ---------- */
+  function setFieldError(key, msg) {
+    var wrap = $('wrap_' + key);
+    if (!wrap) return;
+    wrap.classList.toggle('has-error', !!msg);
+    var e = wrap.querySelector('.field__error:last-child');
+    e.textContent = msg || '';
+    e.hidden = !msg;
+  }
+
+  function validate(values) {
+    var errors = {};
+    visibleFields().forEach(function (f) {
+      var wrap = $('wrap_' + f.key);
+      if (wrap && wrap.hidden) return;
+      if (f.type === 'file') {
+        if (f.required && !state.files.length) errors[f.key] = 'レシートを添付してください';
+      } else if (f.required && !values[f.key]) {
+        errors[f.key] = '入力してください';
+      }
+    });
+    if (values.amount) {
+      var a = parseAmount(values.amount);
+      if (!(a > 0) || Math.floor(a) !== a) errors.amount = '1円以上の整数で入力してください';
+    }
+    if (values.invoiceNumber && !/^T\d{13}$/.test(values.invoiceNumber.replace(/[\s-]/g, '').toUpperCase())) {
+      errors.invoiceNumber = '「T」+13桁の数字で入力してください';
+    }
+    return errors;
+  }
+
+  $('expenseForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (state.files.some(function (f) { return f.loading; })) { alert('画像の処理中です。少し待ってから送信してください。'); return; }
+
+    var values = {};
+    visibleFields().forEach(function (f) {
+      if (f.type === 'file') return;
+      var wrap = $('wrap_' + f.key);
+      values[f.key] = wrap && wrap.hidden ? '' : getValue(f.key);
+    });
+    if (values.amount) values.amount = String(parseAmount(values.amount));
+
+    var errors = validate(values);
+    visibleFields().forEach(function (f) { setFieldError(f.key, errors[f.key]); });
+    var keys = Object.keys(errors);
+    if (keys.length) {
+      $('formErrors').textContent = '未入力・誤りがある項目があります。';
+      $('formErrors').hidden = false;
+      var first = $('wrap_' + keys[0]);
+      if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    $('formErrors').hidden = true;
+
+    var payload = {
+      category: state.category.name,
+      values: values,
+      files: state.files.map(function (f) { return { name: f.name, mimeType: f.mimeType, data: f.data }; })
+    };
+    $('overlay').hidden = false;
+    $('submitBtn').disabled = true;
+    call('api_submit', payload).then(function (res) {
+      var payers = recall().payer || {};
+      payers[state.category.name] = values.payerId;
+      remember({ payer: payers });
+      state.lastPayer = values.payerId;
+      $('doneText').textContent = '申請ID：' + res.id + '\n' + res.payerName + ' さん／' + yen(res.amount);
+      $('doneText').style.whiteSpace = 'pre-line';
+      show('viewDone');
+    }).catch(function (err) {
+      $('formErrors').textContent = '送信できませんでした。\n' + (err && err.message ? err.message : err);
+      $('formErrors').hidden = false;
+      $('formErrors').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }).finally(function () {
+      $('overlay').hidden = true;
+      $('submitBtn').disabled = false;
+    });
+  });
+
+  $('againSame').addEventListener('click', function () {
+    renderForm({ payerId: state.lastPayer });
+    show('viewForm');
+  });
+  $('againNew').addEventListener('click', function () {
+    $('categoryBadge').hidden = true;
+    show('viewCategory');
+  });
+})();
+</script>
