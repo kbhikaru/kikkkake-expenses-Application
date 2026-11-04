@@ -4,6 +4,9 @@ KIKKAKE / TIE Coffee 共通の経費申請アプリ（Google Apps Script）。
 Googleフォームのファイルアップロードが共有ドライブで使えなくなった問題を解消し、
 申請 → 承認 → freee会計への連携 → ダッシュボード分析 までを一つにまとめます。
 
+管理者：https://script.google.com/a/macros/souvenir.ink/s/AKfycbzwcZwfwqkx4TSLRN2N13cIEZw44RPChtlJB1Qb3KuBqa-mLe7rIVl-DUBJK3U1yHQSFQ/exec
+申請者：https://script.google.com/a/macros/souvenir.ink/s/AKfycbxAUFa6CV5ht8p7QLkNnnW7PzBzy5ATz9BxBtBAMz_q7v_FTxxPe1SeK4nC2lnuFL8/exec
+
 ## 構成
 
 ```
