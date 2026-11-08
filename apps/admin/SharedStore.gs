@@ -339,3 +339,64 @@ function log_write_(ss, actor, action, detail) {
     console.warn('log failed', e);
   }
 }
+
+/* ---------------- Drive フォルダ構成 ----------------
+ *  RECEIPT_FOLDER_ID（大元）
+ *    └ 2026年10月_経費精算        … 月フォルダ（自動作成）
+ *        ├ 【精算書】2026年10月_一覧  … 月の精算書（スプレッドシート＋PDF）
+ *        └ K-001_山田太郎           … 支払者フォルダ（RECEIPT_SUBFOLDER_MODE=月別+支払者）
+ *            ├ 2026年10月_K-001_山田太郎_20261015_支払先_800円.jpg
+ *            └ 【精算書】2026年10月_K-001_山田太郎.pdf
+ */
+
+function util_sanitize_(s, max) {
+  return String(s == null ? '' : s).replace(/[\\\/:*?"<>|\r\n\t]/g, '').replace(/\s+/g, '').trim().slice(0, max || 40);
+}
+
+function drive_getOrCreateFolder_(parent, name) {
+  var it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
+}
+
+/** フォルダ・精算書の「月」を決める日付（設定 RECEIPT_MONTH_BASIS） */
+function drive_basisDate_(settings, paymentDate, submittedAt) {
+  var useSubmitted = settings.RECEIPT_MONTH_BASIS === '申請日';
+  var v = useSubmitted ? (submittedAt || new Date()) : paymentDate;
+  if (util_isDate_(v)) return v;
+  var d = new Date(String(v).replace(/\//g, '-').replace(' ', 'T') + (String(v).length <= 10 ? 'T00:00:00+09:00' : '+09:00'));
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+/** レコード（シートから読んだもの）の対象月 'yyyy-MM' */
+function drive_recordMonth_(settings, r) {
+  return util_formatDate_(drive_basisDate_(settings, r.paymentDate, r.submittedAt), 'yyyy-MM');
+}
+
+function drive_monthLabel_(date) { return Utilities.formatDate(date, TZ, 'yyyy年MM月'); }
+
+function drive_payerFolderName_(payerId, payerName) {
+  return [util_sanitize_(payerId, 30), util_sanitize_(payerName, 30)].filter(String).join('_');
+}
+
+function drive_monthFolder_(settings, date) {
+  if (!settings.RECEIPT_FOLDER_ID) throw new Error('領収書の保存先（RECEIPT_FOLDER_ID）が未設定です');
+  var root = DriveApp.getFolderById(settings.RECEIPT_FOLDER_ID);
+  return drive_getOrCreateFolder_(root, Utilities.formatDate(date, TZ, settings.RECEIPT_SUBFOLDER_FORMAT || 'yyyy年MM月_経費精算'));
+}
+
+/** 領収書の保存先フォルダ（設定 RECEIPT_SUBFOLDER_MODE に従う） */
+function drive_receiptFolder_(settings, info) {
+  var mode = settings.RECEIPT_SUBFOLDER_MODE || '月別+支払者';
+  if (mode === 'なし') return DriveApp.getFolderById(settings.RECEIPT_FOLDER_ID);
+  var folder = drive_monthFolder_(settings, info.date);
+  if (mode === '月別+所属区分') folder = drive_getOrCreateFolder_(folder, info.category);
+  if (mode === '月別+支払者') folder = drive_getOrCreateFolder_(folder, drive_payerFolderName_(info.payerId, info.payerName));
+  return folder;
+}
+
+/** 同名ファイルがあればゴミ箱へ移してから作成（精算書の作り直し用） */
+function drive_replaceFile_(folder, blob) {
+  var it = folder.getFilesByName(blob.getName());
+  while (it.hasNext()) it.next().setTrashed(true);
+  return folder.createFile(blob);
+}

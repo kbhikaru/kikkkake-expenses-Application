@@ -37,7 +37,8 @@ function api_overview(token) {
     statuses: [STATUS.PENDING, STATUS.APPROVED, STATUS.REJECTED, STATUS.EXPORTED],
     accounts: form_getAccounts_(ss, true).map(function (a) { return { label: a.label, categories: a.categories }; }),
     taxes: form_getTaxes_(ss, true).map(function (t) { return { label: t.label, rate: t.rate }; }),
-    invoiceOptions: [INVOICE_QUALIFIED, INVOICE_NON_QUALIFIED]
+    invoiceOptions: [INVOICE_QUALIFIED, INVOICE_NON_QUALIFIED],
+    freeeGrouping: settings.FREEE_GROUPING || '精算書ごと'
   };
 }
 
@@ -288,7 +289,10 @@ function checkSettings_(s) {
       }
     } catch (e) { problems.push('従業員マスタにアクセスできません（EMPLOYEE_SPREADSHEET_ID）'); }
   }
-  if (['なし', '月別', '月別+所属区分'].indexOf(s.RECEIPT_SUBFOLDER_MODE || '月別') < 0) problems.push('RECEIPT_SUBFOLDER_MODE は「なし / 月別 / 月別+所属区分」のいずれかです');
+  if (['なし', '月別', '月別+所属区分', '月別+支払者'].indexOf(s.RECEIPT_SUBFOLDER_MODE || '月別+支払者') < 0) problems.push('RECEIPT_SUBFOLDER_MODE は「なし / 月別 / 月別+所属区分 / 月別+支払者」のいずれかです');
+  if (['支払日', '申請日'].indexOf(s.RECEIPT_MONTH_BASIS || '支払日') < 0) problems.push('RECEIPT_MONTH_BASIS は「支払日 / 申請日」のいずれかです');
+  var day = Number(s.STATEMENT_AUTO_DAY || 5);
+  if (!(day >= 1 && day <= 28)) problems.push('STATEMENT_AUTO_DAY は1〜28の数字で入力してください');
   if (['切り捨て', '四捨五入', '切り上げ'].indexOf(s.TAX_ROUNDING || '切り捨て') < 0) problems.push('TAX_ROUNDING は「切り捨て / 四捨五入 / 切り上げ」のいずれかです');
   return problems;
 }

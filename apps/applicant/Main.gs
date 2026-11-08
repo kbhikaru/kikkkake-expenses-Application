@@ -154,7 +154,7 @@ function api_submit(payload) {
 
   // ---- 領収書の保存 ----
   var saved = files.length ? saveReceipts_(settings, files, {
-    id: id, date: payDate, category: category.name, payerName: payer.name, vendor: values.vendor, amount: amount
+    id: id, date: payDate, category: category.name, payerId: payer.id, payerName: payer.name, vendor: values.vendor, amount: amount
   }) : [];
 
   // ---- カスタム項目 ----
@@ -208,19 +208,18 @@ function api_submit(payload) {
 /* ---------------- 領収書の保存 ---------------- */
 
 function saveReceipts_(settings, files, info) {
-  var folder = DriveApp.getFolderById(settings.RECEIPT_FOLDER_ID);
-  var mode = settings.RECEIPT_SUBFOLDER_MODE || '月別';
-  if (mode !== 'なし') {
-    folder = getOrCreateFolder_(folder, Utilities.formatDate(info.date, TZ, settings.RECEIPT_SUBFOLDER_FORMAT || 'yyyy年MM月_経費精算'));
-    if (mode === '月別+所属区分') folder = getOrCreateFolder_(folder, info.category);
-  }
+  // 例：大元 > 2026年10月_経費精算 > K-001_山田太郎 > 2026年10月_K-001_山田太郎_20261015_支払先_800円.jpg
+  var monthDate = drive_basisDate_(settings, info.date, new Date());
+  var folder = drive_receiptFolder_(settings, {
+    date: monthDate, category: info.category, payerId: info.payerId, payerName: info.payerName
+  });
   var base = [
+    drive_monthLabel_(monthDate),
+    drive_payerFolderName_(info.payerId, info.payerName),
     Utilities.formatDate(info.date, TZ, 'yyyyMMdd'),
-    info.category,
-    info.payerName,
-    info.vendor,
+    sanitizeFileName_(info.vendor),
     info.amount + '円'
-  ].map(sanitizeFileName_).filter(String).join('_');
+  ].filter(String).join('_');
 
   return files.map(function (f, i) {
     var ext = (String(f.name).match(/\.[A-Za-z0-9]{1,5}$/) || [''])[0] ||
@@ -231,11 +230,6 @@ function saveReceipts_(settings, files, info) {
     file.setDescription('申請ID: ' + info.id);
     return { id: file.getId(), url: file.getUrl() };
   });
-}
-
-function getOrCreateFolder_(parent, name) {
-  var it = parent.getFoldersByName(name);
-  return it.hasNext() ? it.next() : parent.createFolder(name);
 }
 
 function sanitizeFileName_(s) {

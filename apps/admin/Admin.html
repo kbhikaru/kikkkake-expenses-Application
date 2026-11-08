@@ -25,6 +25,7 @@
       <nav class="tabs" role="tablist">
         <button class="tab is-active" data-tab="dashboard" role="tab">ダッシュボード</button>
         <button class="tab" data-tab="records" role="tab">申請一覧</button>
+        <button class="tab" data-tab="statements" role="tab">月次精算書</button>
         <button class="tab" data-tab="freee" role="tab">freee連携</button>
         <button class="tab" data-tab="form" role="tab">フォーム編集</button>
         <button class="tab" data-tab="masters" role="tab">マスタ</button>
@@ -94,6 +95,41 @@
         <div class="table-wrap card card--flush"><table class="table table--hover" id="recordTable"></table></div>
       </section>
 
+      <!-- 月次精算書 -->
+      <section class="panel" id="tab-statements" hidden>
+        <div class="grid2">
+          <div class="card">
+            <h2 class="card__title">精算書を作成する</h2>
+            <p class="muted small">対象月の承認済の申請を、支払者ごとの精算書（PDF）にまとめて Drive の月フォルダに保存します。各明細には「領収書」と「元データ（経費データの該当行）」へのリンクが入ります。同じ月を作り直すと上書きされます。</p>
+            <div class="form-grid">
+              <label>対象月 <input type="month" id="sMonth"></label>
+            </div>
+            <div id="sPreview" class="result" hidden></div>
+            <button class="btn btn--primary" id="sGenerate">精算書を作成</button>
+            <div id="sResult" hidden></div>
+          </div>
+          <div>
+            <div class="card">
+              <h2 class="card__title">毎月の自動作成</h2>
+              <p class="muted small">オンにすると、毎月決まった日（設定 STATEMENT_AUTO_DAY）の朝6時台に前月分を自動で作成し、NOTIFY_EMAILS にメールでお知らせします。</p>
+              <div id="sAutoStatus" class="result"></div>
+              <button class="btn btn--sm" id="sAutoToggle">切り替え</button>
+            </div>
+            <div class="card">
+              <h2 class="card__title">保存されるフォルダ</h2>
+              <pre class="tree small">経費申請（大元フォルダ）
+└ 2026年10月_経費精算
+   ├ 【精算書】2026年10月_一覧（スプレッドシート・PDF）
+   ├ K-001_山田太郎
+   │  ├ 2026年10月_K-001_山田太郎_20261015_店名_800円.jpg
+   │  └ 【精算書】2026年10月_K-001_山田太郎.pdf
+   └ Barista-001_…</pre>
+              <p class="muted small">月フォルダ・社員フォルダは申請時に自動で作成されます（設定 RECEIPT_SUBFOLDER_MODE＝月別+支払者）。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- freee連携 -->
       <section class="panel" id="tab-freee" hidden>
         <div class="grid2">
@@ -101,8 +137,15 @@
             <h2 class="card__title">方式A：CSVで取り込む（おすすめ）</h2>
             <p class="muted small">「承認済」の申請を freee会計の［取引の一覧・登録 → 取引のインポート］用CSVで出力します。</p>
             <div class="form-grid">
-              <label>支払日（から）<input type="date" id="fFrom"></label>
-              <label>支払日（まで）<input type="date" id="fTo"></label>
+              <label>まとめ方
+                <select id="fGrouping">
+                  <option value="精算書ごと">精算書ごと（支払者×月で1取引・精算書PDFを添付）</option>
+                  <option value="申請ごと">申請ごと（1申請＝1取引）</option>
+                </select>
+              </label>
+              <label data-group="statement">対象月 <input type="month" id="fMonth"></label>
+              <label data-group="record">支払日（から）<input type="date" id="fFrom"></label>
+              <label data-group="record">支払日（まで）<input type="date" id="fTo"></label>
               <label>所属区分 <select id="fCategory"></select></label>
               <label class="check"><input type="checkbox" id="fMark" checked> 出力した申請を「freee連携済」にする</label>
               <label class="check"><input type="checkbox" id="fIncludeExported"> 連携済も含めて再出力する</label>
@@ -112,7 +155,7 @@
           </div>
           <div class="card">
             <h2 class="card__title">方式B：freee APIで直接登録</h2>
-            <p class="muted small">取引の登録と同時に、領収書画像を freee のファイルボックスに証憑として添付します。</p>
+            <p class="muted small">左で選んだ「まとめ方・対象月」で取引を登録し、証憑（精算書ごと＝精算書PDF／申請ごと＝領収書画像）を freee のファイルボックスに添付します。</p>
             <div id="freeeStatus" class="result"></div>
             <details class="details">
               <summary>freeeアプリの登録（初回のみ）</summary>
