@@ -1,0 +1,43 @@
+# main の apps/applicant と apps/admin を、Google Apps Script GitHub Assistant 用の
+# ブランチ（gas-applicant / gas-admin）にそれぞれ書き出します。
+# 各GASエディタではこのブランチを選んで「Pull」するだけで最新になります。
+# ※ gas-* ブランチは自動生成です。GASエディタから Push しないでください（次回の同期で上書きされます）。
+name: Sync GAS branches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/**'
+      - 'shared/**'
+      - '.github/workflows/sync-gas-branches.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-gas-branches
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shared files are synced
+        run: |
+          for app in applicant admin; do
+            for f in shared/*.gs; do
+              cmp -s "$f" "apps/$app/$(basename "$f")" || { echo "::error::$f が apps/$app にコピーされていません（scripts/sync-shared.sh を実行してください）"; exit 1; }
+            done
+          done
+
+      - name: Publish gas-applicant / gas-admin
+        run: ./scripts/publish-gas-branches.sh
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
