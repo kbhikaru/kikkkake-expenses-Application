@@ -1,0 +1,878 @@
+<script>
+(function () {
+  'use strict';
+
+  var TOKEN_KEY = 'expense-admin:token';
+  var S = { token: null, overview: null, config: null, records: [], selected: {}, charts: {}, master: 'accounts', fields: [] };
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* ================= 共通 ================= */
+
+  function rawCall(fn, args) {
+    return new Promise(function (resolve, reject) {
+      if (window.google && google.script && google.script.run) {
+        var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+        runner[fn].apply(runner, args);
+      } else if (window.__MOCK__ && window.__MOCK__[fn]) {
+        setTimeout(function () { try { resolve(window.__MOCK__[fn].apply(null, args)); } catch (e) { reject(e); } }, 200);
+      } else {
+        reject(new Error('Google Apps Script 環境で開いてください'));
+      }
+    });
+  }
+
+  /** 認証付きAPI呼び出し（トークンを先頭に付与） */
+  function api(fn) {
+    var args = [S.token].concat(Array.prototype.slice.call(arguments, 1));
+    return rawCall(fn, args).catch(function (err) {
+      var msg = err && err.message ? err.message : String(err);
+      if (msg.indexOf('AUTH:') >= 0) { logout(msg.replace(/^.*AUTH:\s*/, '')); }
+      throw err;
+    });
+  }
+
+  function busy(on) { $('busy').hidden = !on; }
+  var toastTimer;
+  function toast(msg, ng) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (ng ? ' toast--ng' : '');
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, ng ? 6000 : 3000);
+  }
+  function fail(err) { busy(false); toast(err && err.message ? err.message.replace(/^.*AUTH:\s*/, '') : String(err), true); }
+
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      var v = attrs[k];
+      if (k === 'text') e.textContent = v;
+      else if (k === 'html') e.innerHTML = v;
+      else if (k === 'class') e.className = v;
+      else if (k === 'style') e.setAttribute('style', v);
+      else if (k.indexOf('on') === 0) e.addEventListener(k.slice(2), v);
+      else if (k === 'checked' || k === 'disabled' || k === 'selected') e[k] = !!v;
+      else if (k === 'value') e.value = v == null ? '' : v;
+      else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v);
+    });
+    (children || []).forEach(function (c) { if (c != null && c !== false) e.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c); });
+    return e;
+  }
+  function options(select, list, current, emptyLabel) {
+    select.innerHTML = '';
+    if (emptyLabel != null) select.appendChild(el('option', { value: '', text: emptyLabel }));
+    list.forEach(function (o) {
+      var v = typeof o === 'object' ? o.value : o, t = typeof o === 'object' ? o.text : o;
+      select.appendChild(el('option', { value: v, text: t, selected: v === current }));
+    });
+    return select;
+  }
+  function yen(n) { return '¥' + Math.round(Number(n) || 0).toLocaleString('ja-JP'); }
+  function pad(n) { return ('0' + n).slice(-2); }
+  function ym(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1); }
+  function ymd(d) { return ym(d) + '-' + pad(d.getDate()); }
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function catColor(name) {
+    var c = (S.overview.categories || []).filter(function (x) { return x.name === name; })[0];
+    return (c && c.color) || cssVar('--muted');
+  }
+  function statusBadge(s) { return el('span', { class: 'status status--' + s, text: s || '' }); }
+
+  /* ================= ログイン ================= */
+
+  function showLogin(msg) {
+    $('appView').hidden = true;
+    $('loginView').hidden = false;
+    $('loginError').hidden = !msg;
+    $('loginError').textContent = msg || '';
+    $('loginPassword').focus();
+  }
+  function logout(msg) {
+    if (S.token) rawCall('api_logout', [S.token]).catch(function () {});
+    S.token = null;
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
+    showLogin(msg);
+  }
+
+  $('loginForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    busy(true);
+    rawCall('api_login', [$('loginPassword').value]).then(function (res) {
+      S.token = res.token;
+      try { sessionStorage.setItem(TOKEN_KEY, res.token); } catch (e2) {}
+      $('loginPassword').value = '';
+      return start();
+    }).catch(function (err) {
+      busy(false);
+      showLogin(err && err.message ? err.message : String(err));
+    });
+  });
+  $('logoutBtn').addEventListener('click', function () { logout(); });
+
+  function start() {
+    busy(true);
+    return api('api_overview').then(function (ov) {
+      S.overview = ov;
+      $('whoami').textContent = ov.who;
+      $('loginView').hidden = true;
+      $('appView').hidden = false;
+      $('homeLink').href = ov.homeUrl;
+      $('applicantLink').href = ov.applicantUrl || '#';
+      $('previewLink').href = ov.applicantUrl || '#';
+      var cats = ov.categories.map(function (c) { return c.name; });
+      ['dCategory', 'rCategory', 'fCategory'].forEach(function (id) { options($(id), cats, $(id).value, 'すべて'); });
+      options($('rStatus'), ov.statuses, $('rStatus').value || '申請中', 'すべて');
+      busy(false);
+      if (!$('dFrom').value) setRange('6m', true);
+      if (!$('rFrom').value) {
+        var now = new Date();
+        $('rFrom').value = ymd(new Date(now.getFullYear(), now.getMonth() - 2, 1));
+        $('fFrom').value = ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+        $('fTo').value = ymd(new Date(now.getFullYear(), now.getMonth(), 0));
+        $('fMonth').value = $('sMonth').value = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+      }
+      openTab(currentTab);
+    }).catch(function (err) { busy(false); if (S.token) showLogin(err.message); });
+  }
+
+  /* ================= タブ ================= */
+
+  var currentTab = 'dashboard';
+  var loaders = {
+    dashboard: loadDashboard,
+    records: loadRecords,
+    statements: loadStatements,
+    freee: loadFreee,
+    form: function () { return loadConfig().then(renderFieldEditor); },
+    masters: function () { return loadConfig().then(renderMaster); },
+    settings: function () { return loadConfig().then(renderSettings); }
+  };
+  function openTab(name) {
+    currentTab = name;
+    document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('is-active', t.dataset.tab === name); });
+    document.querySelectorAll('.panel').forEach(function (p) { p.hidden = p.id !== 'tab-' + name; });
+    var p = loaders[name]();
+    if (p && p.catch) p.catch(fail);
+  }
+  document.querySelectorAll('.tab').forEach(function (t) { t.addEventListener('click', function () { openTab(t.dataset.tab); }); });
+
+  function loadConfig() {
+    busy(true);
+    return api('api_getConfig').then(function (cfg) { S.config = cfg; busy(false); return cfg; });
+  }
+
+  /* ================= ダッシュボード ================= */
+
+  function setRange(kind, silent) {
+    var now = new Date(), from, to = ym(now);
+    if (kind === 'this') from = to;
+    else if (kind === 'last') { from = to = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1)); }
+    else if (kind === 'fy') from = now.getFullYear() + '-01';
+    else from = ym(new Date(now.getFullYear(), now.getMonth() - 5, 1));
+    $('dFrom').value = from; $('dTo').value = to;
+    document.querySelectorAll('[data-range]').forEach(function (b) { b.classList.toggle('is-active', b.dataset.range === kind); });
+    if (!silent) loadDashboard();
+  }
+  document.querySelectorAll('[data-range]').forEach(function (b) { b.addEventListener('click', function () { setRange(b.dataset.range); }); });
+  ['dFrom', 'dTo', 'dCategory'].forEach(function (id) {
+    $(id).addEventListener('change', function () {
+      document.querySelectorAll('[data-range]').forEach(function (b) { b.classList.remove('is-active'); });
+      loadDashboard();
+    });
+  });
+
+  function loadDashboard() {
+    busy(true);
+    return api('api_dashboard', { from: $('dFrom').value, to: $('dTo').value, category: $('dCategory').value }).then(function (d) {
+      busy(false);
+      renderKpis(d);
+      renderMonthly(d);
+      renderAccount(d);
+      renderPayer(d);
+    });
+  }
+
+  function renderKpis(d) {
+    var k = d.kpi;
+    var box = $('kpis');
+    box.innerHTML = '';
+    [
+      ['経費合計', yen(k.total), k.count + '件'],
+      ['1件あたり平均', yen(k.average), ''],
+      ['利用者数', k.payers + '人', '期間内に申請があった人'],
+      ['未承認', k.pendingCount + '件', yen(k.pendingAmount), k.pendingCount ? 'kpi--warn' : '']
+    ].forEach(function (x) {
+      box.appendChild(el('div', { class: 'kpi ' + (x[3] || '') }, [
+        el('div', { class: 'kpi__label', text: x[0] }),
+        el('div', { class: 'kpi__value', text: x[1] }),
+        el('div', { class: 'kpi__sub', text: x[2] })
+      ]));
+    });
+  }
+
+  function baseOptions(horizontal) {
+    var muted = cssVar('--muted'), grid = cssVar('--grid');
+    var valueAxis = { beginAtZero: true, grid: { color: grid }, border: { display: false },
+      ticks: { color: muted, callback: function (v) { return v >= 10000 ? (v / 10000) + '万' : v.toLocaleString(); } } };
+    var catAxis = { grid: { display: false }, border: { color: grid }, ticks: { color: muted, autoSkip: false } };
+    return {
+      responsive: true, maintainAspectRatio: false,
+      indexAxis: horizontal ? 'y' : 'x',
+      interaction: { mode: horizontal ? 'nearest' : 'index', intersect: horizontal },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: function (ctx) { return (ctx.dataset.label ? ctx.dataset.label + '：' : '') + yen(horizontal ? ctx.parsed.x : ctx.parsed.y); } } }
+      },
+      scales: horizontal ? { x: valueAxis, y: catAxis } : { x: catAxis, y: valueAxis }
+    };
+  }
+
+  function drawChart(id, config) {
+    if (!window.Chart) return;
+    if (S.charts[id]) S.charts[id].destroy();
+    S.charts[id] = new Chart($(id), config);
+  }
+
+  function renderMonthly(d) {
+    var cats = d.categories.filter(function (c) { return !$('dCategory').value || c.name === $('dCategory').value; });
+    var legend = $('monthlyLegend');
+    legend.innerHTML = '';
+    cats.forEach(function (c) {
+      var s = el('span', { text: c.name });
+      s.style.setProperty('--c', c.color || cssVar('--series-1'));
+      legend.appendChild(s);
+    });
+    var surface = cssVar('--surface');
+    var opts = baseOptions(false);
+    opts.scales.x.stacked = true; opts.scales.y.stacked = true;
+    drawChart('chartMonthly', {
+      type: 'bar',
+      data: {
+        labels: d.monthly.map(function (m) { return Number(m.month.slice(5)) + '月'; }),
+        datasets: cats.map(function (c) {
+          return { label: c.name, data: d.monthly.map(function (m) { return m[c.name] || 0; }),
+            backgroundColor: c.color || cssVar('--series-1'), borderColor: surface, borderWidth: { top: 2 },
+            borderRadius: 4, borderSkipped: 'start', maxBarThickness: 36 };
+        })
+      },
+      options: opts
+    });
+  }
+
+  function renderAccount(d) {
+    var rows = d.byAccount.slice(0, 12);
+    drawChart('chartAccount', {
+      type: 'bar',
+      data: { labels: rows.map(function (r) { return r.label; }),
+        datasets: [{ label: '', data: rows.map(function (r) { return r.amount; }), backgroundColor: cssVar('--series-1'), borderRadius: 4, borderSkipped: 'start', maxBarThickness: 18 }] },
+      options: baseOptions(true)
+    });
+  }
+
+  function renderPayer(d) {
+    var top = d.byPayer.slice(0, 15);
+    drawChart('chartPayer', {
+      type: 'bar',
+      data: { labels: top.map(function (r) { return r.name; }),
+        datasets: [{ label: '', data: top.map(function (r) { return r.amount; }), backgroundColor: top.map(function (r) { return catColor(r.category); }), borderRadius: 4, borderSkipped: 'start', maxBarThickness: 18 }] },
+      options: baseOptions(true)
+    });
+    var total = d.kpi.total || 1;
+    var t = $('payerTable');
+    t.innerHTML = '';
+    t.appendChild(el('thead', {}, [el('tr', {}, [
+      el('th', { text: '支払者' }), el('th', { text: '所属区分' }), el('th', { class: 'num', text: '件数' }),
+      el('th', { class: 'num', text: '金額' }), el('th', { class: 'num', text: '構成比' })
+    ])]));
+    var tb = el('tbody');
+    d.byPayer.forEach(function (r) {
+      var dot = el('span', { class: 'dot' }); dot.style.setProperty('--c', catColor(r.category));
+      tb.appendChild(el('tr', {}, [
+        el('td', {}, [r.name, el('div', { class: 'muted small', text: r.id || '' })]),
+        el('td', { class: 'nowrap' }, [dot, r.category || '']),
+        el('td', { class: 'num', text: r.count }),
+        el('td', { class: 'num', text: yen(r.amount) }),
+        el('td', { class: 'num', text: (r.amount / total * 100).toFixed(1) + '%' })
+      ]));
+    });
+    if (!d.byPayer.length) tb.appendChild(el('tr', {}, [el('td', { colspan: 5, class: 'muted', text: 'データがありません' })]));
+    t.appendChild(tb);
+  }
+
+  /* ================= 申請一覧 ================= */
+
+  $('rSearch').addEventListener('click', function () { loadRecords().catch(fail); });
+  $('rQuery').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadRecords().catch(fail); });
+  ['rFrom', 'rTo', 'rCategory', 'rStatus'].forEach(function (id) { $(id).addEventListener('change', function () { loadRecords().catch(fail); }); });
+
+  function loadRecords() {
+    busy(true);
+    return api('api_listRecords', { from: $('rFrom').value, to: $('rTo').value, category: $('rCategory').value, status: $('rStatus').value, q: $('rQuery').value })
+      .then(function (res) {
+        busy(false);
+        S.records = res.rows;
+        S.selected = {};
+        $('rSummary').textContent = res.rows.length + '件 ／ 合計 ' + yen(res.total) + (res.truncated ? '（1000件まで表示）' : '');
+        renderRecordTable();
+      });
+  }
+
+  function updateBulk() {
+    var n = Object.keys(S.selected).length;
+    ['bulkApprove', 'bulkReject', 'bulkPending'].forEach(function (id) { $(id).disabled = !n; });
+    $('bulkApprove').textContent = n ? '選択した' + n + '件を承認' : '選択を承認';
+  }
+
+  function renderRecordTable() {
+    var t = $('recordTable');
+    t.innerHTML = '';
+    var all = el('input', { type: 'checkbox', 'aria-label': 'すべて選択', onchange: function (e) {
+      S.selected = {};
+      if (e.target.checked) S.records.forEach(function (r) { S.selected[r.id] = true; });
+      t.querySelectorAll('tbody input[type=checkbox]').forEach(function (c) { c.checked = e.target.checked; });
+      updateBulk();
+    } });
+    t.appendChild(el('thead', {}, [el('tr', {}, [
+      el('th', {}, [all]), el('th', { text: 'ステータス' }), el('th', { text: '支払日' }), el('th', { text: '所属区分' }),
+      el('th', { text: '支払者' }), el('th', { text: '支払先' }), el('th', { text: '勘定科目' }),
+      el('th', { class: 'num', text: '金額' }), el('th', { text: '領収書' }), el('th', { text: '内容' })
+    ])]));
+    var tb = el('tbody');
+    S.records.forEach(function (r) {
+      var cb = el('input', { type: 'checkbox', 'aria-label': r.id + 'を選択', onclick: function (e) { e.stopPropagation(); },
+        onchange: function (e) { if (e.target.checked) S.selected[r.id] = true; else delete S.selected[r.id]; updateBulk(); } });
+      var dot = el('span', { class: 'dot' }); dot.style.setProperty('--c', catColor(r.category));
+      var urls = String(r.receiptUrls || '').split('\n').filter(String);
+      tb.appendChild(el('tr', { onclick: function () { openDetail(r.id); } }, [
+        el('td', {}, [cb]),
+        el('td', {}, [statusBadge(r.status)]),
+        el('td', { class: 'nowrap', text: String(r.paymentDate || '').replace(/-/g, '/') }),
+        el('td', { class: 'nowrap' }, [dot, r.category]),
+        el('td', { class: 'nowrap', text: r.payerName }),
+        el('td', { class: 'ellipsis', text: r.vendor, title: r.vendor }),
+        el('td', { class: 'ellipsis', text: r.freeeAccountItem || r.accountItem }),
+        el('td', { class: 'num', text: yen(r.amount) }),
+        el('td', {}, urls.map(function (u, i) {
+          return el('a', { href: u, target: '_blank', rel: 'noopener', text: '📎' + (urls.length > 1 ? i + 1 : ''), onclick: function (e) { e.stopPropagation(); } });
+        })),
+        el('td', { class: 'ellipsis', text: r.description, title: r.description })
+      ]));
+    });
+    if (!S.records.length) tb.appendChild(el('tr', {}, [el('td', { colspan: 10, class: 'muted', text: '該当する申請はありません' })]));
+    t.appendChild(tb);
+    updateBulk();
+  }
+
+  function changeStatus(ids, status) {
+    var comment = null;
+    if (status === '差戻し') {
+      comment = prompt('差戻しの理由を入力してください（申請者への連絡用）');
+      if (!comment) return Promise.resolve(false);
+    }
+    busy(true);
+    return api('api_setStatus', ids, status, comment).then(function (n) {
+      busy(false); toast(n + '件を「' + status + '」にしました'); return true;
+    });
+  }
+  $('bulkApprove').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '承認済').then(function (ok) { if (ok) return loadRecords(); }).catch(fail); });
+  $('bulkReject').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '差戻し').then(function (ok) { if (ok) return loadRecords(); }).catch(fail); });
+  $('bulkPending').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '申請中').then(function (ok) { if (ok) return loadRecords(); }).catch(fail); });
+
+  /* ---------- 詳細モーダル ---------- */
+  function closeModal() { $('modal').hidden = true; }
+  $('modalClose').addEventListener('click', closeModal);
+  $('modal').addEventListener('click', function (e) { if (e.target === $('modal')) closeModal(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+
+  function openDetail(id) {
+    var r = S.records.filter(function (x) { return x.id === id; })[0];
+    if (!r) return;
+    var ov = S.overview;
+    var body = $('modalBody');
+    body.innerHTML = '';
+    $('modalTitle').textContent = r.payerName + '／' + yen(r.amount);
+
+    var inputs = {};
+    function field(label, key, input, wide) {
+      inputs[key] = input;
+      return el('label', { class: wide ? 'wide' : '' }, [label, input]);
+    }
+    var accSel = options(el('select'), ov.accounts.map(function (a) { return a.label; }), r.accountItem);
+    if (r.accountItem && !ov.accounts.some(function (a) { return a.label === r.accountItem; })) accSel.appendChild(el('option', { value: r.accountItem, text: r.accountItem + '（マスタに無し）', selected: true }));
+    var grid = el('div', { class: 'detail-grid' }, [
+      field('所属区分', 'category', options(el('select'), ov.categories.map(function (c) { return c.name; }), r.category)),
+      field('支払者ID', 'payerId', el('input', { type: 'text', value: r.payerId })),
+      field('支払日', 'paymentDate', el('input', { type: 'date', value: String(r.paymentDate || '').replace(/\//g, '-') })),
+      field('支払先/店名', 'vendor', el('input', { type: 'text', value: r.vendor })),
+      field('金額（税込）', 'amount', el('input', { type: 'number', value: r.amount, min: 1 })),
+      field('勘定科目', 'accountItem', accSel),
+      field('税率', 'taxRateLabel', options(el('select'), ov.taxes.map(function (t) { return t.label; }), r.taxRateLabel)),
+      field('適格請求書', 'invoiceType', options(el('select'), ov.invoiceOptions, r.invoiceType, '（未入力）')),
+      field('登録番号', 'invoiceNumber', el('input', { type: 'text', value: r.invoiceNumber })),
+      field('支払方法', 'paymentMethod', el('input', { type: 'text', value: r.paymentMethod })),
+      field('備考・内容', 'description', el('textarea', { rows: 2, value: r.description }), true),
+      field('承認・差戻しコメント', 'reviewComment', el('textarea', { rows: 2, value: r.reviewComment }), true)
+    ]);
+    var urls = String(r.receiptUrls || '').split('\n').filter(String);
+    var extra = '';
+    try { extra = r.extra ? Object.entries(JSON.parse(r.extra)).map(function (kv) { return kv[0] + '：' + kv[1]; }).join(' ／ ') : ''; } catch (e) { extra = r.extra; }
+
+    body.appendChild(el('div', {}, [statusBadge(r.status)]));
+    body.appendChild(el('div', { class: 'receipts' }, urls.length ? urls.map(function (u, i) {
+      return el('a', { class: 'btn btn--sm', href: u, target: '_blank', rel: 'noopener', text: '📎 領収書' + (urls.length > 1 ? i + 1 : '') + 'を開く' });
+    }) : [el('span', { class: 'muted', text: '領収書なし' })]));
+    body.appendChild(grid);
+    body.appendChild(el('div', { class: 'meta' }, [
+      el('span', { text: '申請ID：' + r.id }),
+      el('span', { text: '申請日時：' + r.submittedAt }),
+      el('span', { text: '申請者：' + (r.applicantEmail || '-') }),
+      el('span', { text: 'freee：' + (r.freeeAccountItem || '') + '／' + (r.freeeTaxName || '') + (r.department ? '／部門 ' + r.department : '') }),
+      el('span', { text: '税抜 ' + yen(r.netAmount) + '／消費税 ' + yen(r.taxAmount) }),
+      r.reviewer ? el('span', { text: '承認者：' + r.reviewer + '（' + r.reviewedAt + '）' }) : null,
+      r.statementId ? el('span', {}, ['精算書：' + r.statementId + ' ', r.statementUrl ? el('a', { href: r.statementUrl, target: '_blank', rel: 'noopener', text: 'PDF' }) : null]) : null,
+      r.freeeExportBatch ? el('span', { text: 'freee出力：' + r.freeeExportBatch + (r.freeeDealId ? '（取引ID ' + r.freeeDealId + '）' : '') }) : null,
+      extra ? el('span', { text: 'その他：' + extra }) : null
+    ]));
+
+    function collect() {
+      var v = {};
+      Object.keys(inputs).forEach(function (k) { v[k] = inputs[k].value; });
+      return v;
+    }
+    function after() { closeModal(); return loadRecords(); }
+    body.appendChild(el('div', { class: 'btn-row' }, [
+      el('button', { class: 'btn', text: '修正内容を保存', onclick: function () {
+        busy(true);
+        api('api_updateRecord', r.id, collect()).then(function () { busy(false); toast('保存しました'); return after(); }).catch(fail);
+      } }),
+      el('button', { class: 'btn btn--primary', text: '保存して承認', onclick: function () {
+        busy(true);
+        api('api_updateRecord', r.id, collect()).then(function () { return changeStatus([r.id], '承認済'); }).then(after).catch(fail);
+      } }),
+      el('button', { class: 'btn btn--danger', text: '差戻し', onclick: function () {
+        changeStatus([r.id], '差戻し').then(function (ok) { if (ok) return after(); }).catch(fail);
+      } }),
+      r.status !== '申請中' ? el('button', { class: 'btn btn--ghost', text: '申請中に戻す', onclick: function () {
+        changeStatus([r.id], '申請中').then(after).catch(fail);
+      } }) : null
+    ]));
+    $('modal').hidden = false;
+  }
+
+  /* ================= 月次精算書 ================= */
+
+  function loadStatements() {
+    previewStatement();
+    return loadStatementAuto();
+  }
+
+  function previewStatement() {
+    var m = $('sMonth').value;
+    if (!m) return;
+    api('api_statementPreview', m).then(function (p) {
+      var box = $('sPreview');
+      box.hidden = false;
+      box.className = 'result';
+      box.textContent = Number(m.slice(5)) + '月分（' + p.basis + '基準）：' + p.payers + '名・' + p.count + '件・' + yen(p.total) +
+        (p.pending ? '\n⚠️ 未承認（申請中）が ' + p.pending + ' 件あります' + (p.includePending ? '（精算書に含めます）' : '（精算書には含まれません。先に承認してください）') : '') +
+        (p.existing ? '\n作成済みの精算書があります。作成すると上書きされます。' : '');
+      $('sGenerate').disabled = !p.count;
+    }).catch(fail);
+  }
+  $('sMonth').addEventListener('change', previewStatement);
+
+  $('sGenerate').addEventListener('click', function () {
+    var m = $('sMonth').value;
+    if (!confirm(Number(m.slice(5)) + '月分の精算書を作成します。よろしいですか？')) return;
+    busy(true);
+    api('api_generateStatements', m).then(function (res) {
+      busy(false);
+      toast(res.label + '分の精算書を作成しました');
+      var box = $('sResult');
+      box.hidden = false;
+      box.innerHTML = '';
+      box.appendChild(el('div', { class: 'result result--ok' }, [
+        res.statements.length + '名・' + res.count + '件・' + yen(res.total) + '\n',
+        el('a', { href: res.spreadsheetUrl, target: '_blank', rel: 'noopener', text: '一覧（スプレッドシート）' }), '　',
+        el('a', { href: res.summaryPdfUrl, target: '_blank', rel: 'noopener', text: '一覧PDF' }), '　',
+        el('a', { href: res.folderUrl, target: '_blank', rel: 'noopener', text: '月フォルダを開く' })
+      ]));
+      var t = el('table', { class: 'table' }, [el('thead', {}, [el('tr', {}, [
+        el('th', { text: '支払者' }), el('th', { class: 'num', text: '件数' }), el('th', { class: 'num', text: '合計' }),
+        el('th', { class: 'num', text: '立替精算額' }), el('th', { text: '精算書' })
+      ])])]);
+      var tb = el('tbody');
+      res.statements.forEach(function (x) {
+        var dot = el('span', { class: 'dot' }); dot.style.setProperty('--c', catColor(x.category));
+        tb.appendChild(el('tr', {}, [
+          el('td', {}, [dot, x.payerName, el('div', { class: 'muted small', text: x.id })]),
+          el('td', { class: 'num', text: x.count }), el('td', { class: 'num', text: yen(x.total) }),
+          el('td', { class: 'num', text: yen(x.reimburse) }),
+          el('td', {}, [el('a', { href: x.pdfUrl, target: '_blank', rel: 'noopener', text: 'PDF' })])
+        ]));
+      });
+      t.appendChild(tb);
+      box.appendChild(el('div', { class: 'table-wrap' }, [t]));
+      previewStatement();
+    }).catch(fail);
+  });
+
+  function showAuto(st) {
+    $('sAutoStatus').className = 'result ' + (st.enabled ? 'result--ok' : '');
+    $('sAutoStatus').textContent = st.enabled ? '✅ オン：毎月' + st.day + '日に前月分を自動作成' : 'オフ（手動で作成）';
+    $('sAutoToggle').textContent = st.enabled ? '自動作成をオフにする' : '自動作成をオンにする';
+    $('sAutoToggle').dataset.enabled = st.enabled ? '1' : '';
+  }
+  function loadStatementAuto() { return api('api_statementAutoStatus').then(showAuto); }
+  $('sAutoToggle').addEventListener('click', function () {
+    busy(true);
+    api('api_setStatementAuto', !$('sAutoToggle').dataset.enabled).then(function (st) { busy(false); showAuto(st); toast('保存しました'); }).catch(fail);
+  });
+
+  /* ================= freee連携 ================= */
+
+  function syncGrouping() {
+    var g = $('fGrouping').value;
+    document.querySelectorAll('[data-group]').forEach(function (x) {
+      x.hidden = x.dataset.group !== (g === '精算書ごと' ? 'statement' : 'record');
+    });
+  }
+  $('fGrouping').addEventListener('change', syncGrouping);
+
+  function loadFreee() {
+    if (!loadFreee.inited && S.overview.freeeGrouping) { $('fGrouping').value = S.overview.freeeGrouping; loadFreee.inited = true; }
+    syncGrouping();
+    return api('api_freeeStatus').then(function (st) {
+      $('redirectUri').textContent = st.redirectUri;
+      var box = $('freeeStatus');
+      box.className = 'result ' + (st.connected ? 'result--ok' : '');
+      box.textContent = (st.connected ? '✅ freeeと連携済み' : (st.hasClient ? '⚠️ アプリ登録済み・未連携です。「freeeと連携する」を押してください' : '⚠️ freeeアプリが未登録です（下の手順を参照）')) +
+        '\n事業所ID：' + (st.companyId || '未設定（設定タブで入力）');
+      $('connectBtn').disabled = !st.hasClient;
+      $('syncBtn').disabled = $('sendBtn').disabled = !st.connected;
+    });
+  }
+
+  function freeeFilter() {
+    var grouping = $('fGrouping').value;
+    var f = { grouping: grouping, category: $('fCategory').value, includeExported: $('fIncludeExported').checked };
+    if (grouping === '精算書ごと') f.month = $('fMonth').value;
+    else { f.from = $('fFrom').value; f.to = $('fTo').value; }
+    return f;
+  }
+
+  $('csvBtn').addEventListener('click', function () {
+    var f = freeeFilter();
+    f.markExported = $('fMark').checked;
+    busy(true);
+    api('api_freeeExportCsv', f).then(function (res) {
+      busy(false);
+      var bytes = Uint8Array.from(atob(res.base64), function (c) { return c.charCodeAt(0); });
+      var url = URL.createObjectURL(new Blob([bytes], { type: 'text/csv' }));
+      var box = $('csvResult');
+      box.className = 'result result--ok';
+      box.innerHTML = '';
+      box.appendChild(document.createTextNode(res.count + '件（' + yen(res.total) + '）を ' + res.rows + '行（' + res.grouping + '）で出力しました。\n'));
+      box.appendChild(el('a', { href: url, download: res.fileName, text: '⬇ CSVをダウンロード' }));
+      if (res.url) { box.appendChild(document.createTextNode('　')); box.appendChild(el('a', { href: res.url, target: '_blank', rel: 'noopener', text: 'Driveで開く' })); }
+      box.hidden = false;
+    }).catch(fail);
+  });
+
+  $('saveClientBtn').addEventListener('click', function () {
+    busy(true);
+    api('api_freeeSaveClient', $('fClientId').value, $('fClientSecret').value).then(function () {
+      busy(false); $('fClientSecret').value = ''; toast('保存しました'); return loadFreee();
+    }).catch(fail);
+  });
+  $('connectBtn').addEventListener('click', function () {
+    api('api_freeeAuthUrl').then(function (url) {
+      window.open(url, '_blank');
+      toast('freeeの画面で許可したあと、このタブで「freee連携」を開き直してください');
+    }).catch(fail);
+  });
+  $('syncBtn').addEventListener('click', function () {
+    busy(true);
+    api('api_freeeSyncMasters').then(function (res) {
+      busy(false);
+      var box = $('apiResult');
+      box.hidden = false;
+      box.className = 'result ' + (res.missing.length ? 'result--ng' : 'result--ok');
+      box.textContent = '勘定科目 ' + res.accounts + '件・税区分 ' + res.taxes + '件を同期しました。\nfreeeの部門：' + (res.sections.join('、') || 'なし') +
+        (res.missing.length ? '\n\nfreeeに見つからない名称があります（マスタの名称を修正してください）：\n' + res.missing.join('\n') : '');
+    }).catch(fail);
+  });
+  $('sendBtn').addEventListener('click', function () {
+    if (!confirm('承認済の申請を freee に取引として登録します。よろしいですか？')) return;
+    var ok = 0, ng = [];
+    var box = $('apiResult');
+    box.hidden = false; box.className = 'result';
+    function round() {
+      box.textContent = '登録中… 成功 ' + ok + '件';
+      return api('api_freeeSendDeals', freeeFilter()).then(function (res) {
+        var success = res.results.filter(function (x) { return x.ok; }).length;
+        ok += success;
+        ng = ng.concat(res.results.filter(function (x) { return !x.ok; }));
+        // 成功が1件もない回は打ち切り（同じエラーの繰り返しを防ぐ）
+        if (res.remaining > 0 && success > 0) return round();
+      });
+    }
+    busy(true);
+    round().then(function () {
+      busy(false);
+      box.className = 'result ' + (ng.length ? 'result--ng' : 'result--ok');
+      box.textContent = '登録した取引 ' + ok + '件' + (ng.length ? '\n失敗 ' + ng.length + '件：\n' + ng.map(function (x) { return x.id + '：' + x.error; }).join('\n') : '');
+    }).catch(fail);
+  });
+
+  /* ================= フォーム編集 ================= */
+
+  function renderFieldEditor() {
+    var cfg = S.config;
+    S.fields = cfg.fields.map(function (f) { return JSON.parse(JSON.stringify(f)); });
+    drawFields();
+  }
+
+  function drawFields() {
+    var cfg = S.config;
+    var box = $('fieldEditor');
+    box.innerHTML = '';
+    var catNames = cfg.categories.map(function (c) { return c.name; });
+    S.fields.forEach(function (f, i) {
+      var sys = cfg.systemFields[f.key];
+      var locked = sys && sys.locked;
+      function move(d) { var j = i + d; if (j < 0 || j >= S.fields.length) return; var t = S.fields[i]; S.fields[i] = S.fields[j]; S.fields[j] = t; drawFields(); }
+      var typeSel = options(el('select', { disabled: !!sys, 'aria-label': '種類', onchange: function (e) { f.type = e.target.value; drawFields(); } }),
+        Object.keys(cfg.fieldTypes).filter(function (t) { return sys || ['employee', 'account', 'tax', 'file'].indexOf(t) < 0; })
+          .map(function (t) { return { value: t, text: cfg.fieldTypes[t] }; }), f.type);
+      var head = el('div', { class: 'field-row__head' }, [
+        el('button', { class: 'btn btn--sm btn--ghost', text: '↑', 'aria-label': '上へ', onclick: function () { move(-1); } }),
+        el('button', { class: 'btn btn--sm btn--ghost', text: '↓', 'aria-label': '下へ', onclick: function () { move(1); } }),
+        locked ? el('span', { title: 'freee連携に必須', text: '🔒' }) : null,
+        el('input', { class: 'grow', type: 'text', value: f.label, 'aria-label': 'ラベル', oninput: function (e) { f.label = e.target.value; } }),
+        typeSel,
+        el('label', { class: 'check' }, [el('input', { type: 'checkbox', checked: f.required, disabled: locked, onchange: function (e) { f.required = e.target.checked; } }), '必須']),
+        el('label', { class: 'check' }, [el('input', { type: 'checkbox', checked: f.enabled, disabled: locked, onchange: function (e) { f.enabled = e.target.checked; drawFields(); } }), '表示']),
+        sys ? el('span', { class: 'tag', text: 'システム項目' }) : el('button', { class: 'btn btn--sm btn--danger', text: '削除', onclick: function () {
+          if (confirm('「' + f.label + '」を削除しますか？（過去の申請データは残ります）')) { S.fields.splice(i, 1); drawFields(); }
+        } })
+      ]);
+      var catBox = el('div', { class: 'check-list' }, [
+        el('label', { class: 'check' }, [el('input', { type: 'checkbox', checked: !f.categories.length || f.categories.indexOf('ALL') >= 0, disabled: locked,
+          onchange: function (e) { f.categories = e.target.checked ? ['ALL'] : catNames.slice(0, 1); drawFields(); } }), 'すべての区分'])
+      ].concat(f.categories.indexOf('ALL') >= 0 || !f.categories.length ? [] : catNames.map(function (n) {
+        return el('label', { class: 'check' }, [el('input', { type: 'checkbox', checked: f.categories.indexOf(n) >= 0, onchange: function (e) {
+          f.categories = f.categories.filter(function (x) { return x !== n; });
+          if (e.target.checked) f.categories.push(n);
+        } }), n]);
+      })));
+      var bodyChildren = [
+        el('label', {}, ['説明文', el('input', { type: 'text', value: f.help, oninput: function (e) { f.help = e.target.value; } })]),
+        el('label', {}, ['入力例', el('input', { type: 'text', value: f.placeholder, oninput: function (e) { f.placeholder = e.target.value; } })]),
+        el('label', {}, ['表示する所属区分', catBox])
+      ];
+      if (f.type === 'select' || f.type === 'radio') {
+        bodyChildren.push(el('label', {}, ['選択肢（1行に1つ）', el('textarea', { rows: 3, value: (f.options || []).join('\n'), oninput: function (e) { f.options = e.target.value.split('\n'); } })]));
+      }
+      box.appendChild(el('div', { class: 'field-row' + (f.enabled ? '' : ' is-disabled') }, [head, el('div', { class: 'field-row__body' }, bodyChildren)]));
+    });
+  }
+
+  $('addFieldBtn').addEventListener('click', function () {
+    S.fields.push({ key: '', label: '新しい項目', type: 'text', required: false, enabled: true, options: [], categories: ['ALL'], help: '', placeholder: '' });
+    drawFields();
+    $('fieldEditor').lastChild.scrollIntoView({ behavior: 'smooth' });
+  });
+  $('saveFieldsBtn').addEventListener('click', function () {
+    busy(true);
+    api('api_saveFields', S.fields).then(function (fields) {
+      busy(false); S.config.fields = fields; renderFieldEditor(); toast('フォームを保存しました。申請画面に反映されます');
+    }).catch(fail);
+  });
+
+  /* ================= マスタ ================= */
+
+  var MASTER_DEFS = {
+    accounts: {
+      title: '勘定科目マスタ',
+      help: '「表示名」が申請画面に表示され、「freee勘定科目」がfreeeに連携されます。対象所属区分は ALL / KIKKAKE / TIE Coffee（カンマ区切り）。',
+      cols: [
+        { key: 'label', label: '表示名（申請画面）', width: '28%' },
+        { key: 'freeeName', label: 'freee勘定科目' },
+        { key: 'freeeId', label: 'freee科目ID' },
+        { key: 'categories', label: '対象所属区分', list: true },
+        { key: 'defaultTax', label: '既定の税率', type: 'tax' },
+        { key: 'enabled', label: '有効', type: 'bool' }
+      ]
+    },
+    taxes: {
+      title: '税区分マスタ',
+      help: '「非適格」は適格請求書（インボイス）が無い場合に使う税区分です。2026/10〜2029/9 は「控50」、以降は控除なしになります。',
+      cols: [
+        { key: 'label', label: '表示名（申請画面）', width: '24%' },
+        { key: 'rate', label: '税率(%)', type: 'number' },
+        { key: 'freeeName', label: 'freee税区分（適格）' },
+        { key: 'freeeNameNonQualified', label: 'freee税区分（非適格）' },
+        { key: 'freeeCode', label: 'コード（適格）' },
+        { key: 'freeeCodeNonQualified', label: 'コード（非適格）' },
+        { key: 'enabled', label: '有効', type: 'bool' }
+      ]
+    },
+    categories: {
+      title: '所属区分マスタ',
+      help: '「対象部署」は従業員マスタの「部署・チーム」の値です（カンマ区切り）。「*」はほかの区分に該当しない全員。freee部門はfreeeに登録済みの部門名（空欄 = 部門なし）。',
+      cols: [
+        { key: 'name', label: '区分名' },
+        { key: 'description', label: '説明' },
+        { key: 'departments', label: '対象部署' },
+        { key: 'freeeSection', label: 'freee部門' },
+        { key: 'color', label: '表示色', type: 'color' },
+        { key: 'enabled', label: '有効', type: 'bool' }
+      ]
+    }
+  };
+
+  document.querySelectorAll('[data-master]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      S.master = b.dataset.master;
+      document.querySelectorAll('[data-master]').forEach(function (x) { x.classList.toggle('is-active', x === b); });
+      renderMaster();
+    });
+  });
+
+  function renderMaster() {
+    var def = MASTER_DEFS[S.master];
+    $('masterTitle').textContent = def.title;
+    $('masterHelp').textContent = def.help;
+    S.masterRows = S.config[S.master].map(function (r) {
+      var o = JSON.parse(JSON.stringify(r));
+      def.cols.forEach(function (c) { if (c.list && Array.isArray(o[c.key])) o[c.key] = o[c.key].join(','); });
+      return o;
+    });
+    drawMaster();
+  }
+
+  function drawMaster() {
+    var def = MASTER_DEFS[S.master];
+    var t = $('masterTable');
+    t.innerHTML = '';
+    t.appendChild(el('thead', {}, [el('tr', {}, [el('th', { text: '' })].concat(def.cols.map(function (c) {
+      return el('th', { text: c.label, style: c.width ? 'width:' + c.width : null });
+    })).concat([el('th', { text: '' })]))]));
+    var tb = el('tbody');
+    var taxLabels = S.config.taxes.map(function (x) { return x.label; });
+    S.masterRows.forEach(function (r, i) {
+      function move(d) { var j = i + d; if (j < 0 || j >= S.masterRows.length) return; var tmp = S.masterRows[i]; S.masterRows[i] = S.masterRows[j]; S.masterRows[j] = tmp; drawMaster(); }
+      var cells = def.cols.map(function (c) {
+        var input;
+        if (c.type === 'bool') input = el('input', { type: 'checkbox', checked: r[c.key] !== false, onchange: function (e) { r[c.key] = e.target.checked; } });
+        else if (c.type === 'tax') input = options(el('select', { onchange: function (e) { r[c.key] = e.target.value; } }), taxLabels, r[c.key], '');
+        else if (c.type === 'color') input = el('input', { type: 'color', value: r[c.key] || '#2a78d6', oninput: function (e) { r[c.key] = e.target.value; } });
+        else input = el('input', { type: c.type === 'number' ? 'number' : 'text', value: r[c.key], oninput: function (e) { r[c.key] = e.target.value; } });
+        input.setAttribute('aria-label', c.label);
+        return el('td', {}, [input]);
+      });
+      tb.appendChild(el('tr', {}, [el('td', { class: 'nowrap' }, [
+        el('button', { class: 'btn btn--sm btn--ghost', text: '↑', onclick: function () { move(-1); } }),
+        el('button', { class: 'btn btn--sm btn--ghost', text: '↓', onclick: function () { move(1); } })
+      ])].concat(cells).concat([el('td', {}, [el('button', { class: 'btn btn--sm btn--danger', text: '✕', 'aria-label': '削除', onclick: function () {
+        if (confirm('この行を削除しますか？')) { S.masterRows.splice(i, 1); drawMaster(); }
+      } })])])));
+    });
+    t.appendChild(tb);
+  }
+
+  $('addMasterRow').addEventListener('click', function () {
+    var row = { enabled: true };
+    if (S.master === 'accounts') row.categories = 'ALL';
+    if (S.master === 'taxes') row.rate = 10;
+    S.masterRows.push(row);
+    drawMaster();
+  });
+  $('saveMaster').addEventListener('click', function () {
+    busy(true);
+    api('api_saveMaster', S.master, S.masterRows).then(function () {
+      toast('保存しました');
+      return Promise.all([loadConfig(), api('api_overview')]);
+    }).then(function (res) { S.overview = res[1]; busy(false); renderMaster(); }).catch(fail);
+  });
+
+  /* ================= 設定 ================= */
+
+  var SETTING_GROUPS = [
+    ['保存先', ['DATA_SPREADSHEET_ID', 'DATA_SHEET_NAME', 'RECEIPT_FOLDER_ID', 'RECEIPT_SUBFOLDER_MODE', 'RECEIPT_SUBFOLDER_FORMAT', 'RECEIPT_MONTH_BASIS', 'MAX_FILE_MB']],
+    ['月次精算書', ['STATEMENT_INCLUDE_PENDING', 'STATEMENT_AUTO_DAY']],
+    ['従業員マスタ', ['EMPLOYEE_SPREADSHEET_ID', 'EMPLOYEE_SHEET_NAME', 'EMPLOYEE_ID_COLUMN', 'EMPLOYEE_NAME_COLUMN', 'EMPLOYEE_DEPT_COLUMN', 'EMPLOYEE_STATUS_COLUMN', 'EMPLOYEE_EXCLUDE_STATUS']],
+    ['申請画面・通知', ['APP_TITLE', 'APPLICANT_APP_URL', 'NOTIFY_EMAILS', 'TAX_ROUNDING']],
+    ['freee', ['FREEE_COMPANY_ID', 'FREEE_PARTNER_MODE', 'FREEE_SETTLEMENT_ACCOUNT', 'FREEE_CARD_ACCOUNT', 'FREEE_CASH_ACCOUNT', 'FREEE_CSV_ENCODING', 'FREEE_GROUPING']]
+  ];
+  var SETTING_CHOICES = {
+    RECEIPT_SUBFOLDER_MODE: ['なし', '月別', '月別+所属区分', '月別+支払者'],
+    RECEIPT_MONTH_BASIS: ['支払日', '申請日'],
+    STATEMENT_INCLUDE_PENDING: ['いいえ', 'はい'],
+    FREEE_GROUPING: ['精算書ごと', '申請ごと'],
+    TAX_ROUNDING: ['切り捨て', '四捨五入', '切り上げ'],
+    FREEE_PARTNER_MODE: ['支払先', '支払者', 'なし'],
+    FREEE_CSV_ENCODING: ['UTF-8', 'Shift_JIS']
+  };
+
+  function renderSettings() {
+    var map = {};
+    S.config.settings.forEach(function (s) { map[s.key] = s; });
+    var box = $('settingsForm');
+    box.innerHTML = '';
+    S.settingInputs = {};
+    SETTING_GROUPS.forEach(function (g) {
+      box.appendChild(el('h3', { class: 'card__title', text: g[0] }));
+      g[1].forEach(function (k) {
+        var s = map[k] || { key: k, value: '', note: '' };
+        var input = SETTING_CHOICES[k]
+          ? options(el('select'), SETTING_CHOICES[k], s.value)
+          : el('input', { type: 'text', value: s.value });
+        S.settingInputs[k] = input;
+        box.appendChild(el('label', {}, [el('span', { class: 'key', text: k }), el('span', { class: 'note', text: s.note }), input]));
+      });
+    });
+    $('adminEmails').value = S.config.adminEmails || '';
+  }
+
+  $('saveSettingsBtn').addEventListener('click', function () {
+    var patch = {};
+    Object.keys(S.settingInputs).forEach(function (k) { patch[k] = S.settingInputs[k].value; });
+    busy(true);
+    api('api_saveSettings', patch).then(function () {
+      busy(false); toast('設定を保存しました'); return start();
+    }).catch(fail);
+  });
+  $('testBtn').addEventListener('click', function () {
+    busy(true);
+    api('api_testConnections').then(function (res) {
+      busy(false);
+      var box = $('testResult');
+      box.hidden = false;
+      box.className = 'result ' + (res.ok ? 'result--ok' : 'result--ng');
+      var counts = Object.keys(res.employeeCounts).map(function (k) { return k + '：' + res.employeeCounts[k] + '人'; }).join('、');
+      box.textContent = (res.ok ? '✅ すべて接続できました' : '❌ 問題があります\n' + res.problems.join('\n')) +
+        '\n従業員（所属区分別）：' + (counts || '0人');
+      if (res.folderUrl) { box.appendChild(document.createTextNode('\n')); box.appendChild(el('a', { href: res.folderUrl, target: '_blank', rel: 'noopener', text: '領収書フォルダを開く' })); }
+      box.appendChild(document.createTextNode('　'));
+      box.appendChild(el('a', { href: res.dataSheetUrl, target: '_blank', rel: 'noopener', text: '経費データを開く' }));
+    }).catch(fail);
+  });
+  $('pwBtn').addEventListener('click', function () {
+    busy(true);
+    api('api_changePassword', $('pwCurrent').value, $('pwNext').value).then(function () {
+      busy(false); $('pwCurrent').value = $('pwNext').value = ''; toast('パスワードを変更しました');
+    }).catch(fail);
+  });
+  $('adminEmailsBtn').addEventListener('click', function () {
+    busy(true);
+    api('api_saveAdminEmails', $('adminEmails').value).then(function () { busy(false); toast('保存しました'); }).catch(fail);
+  });
+
+  /* ================= 起動 ================= */
+  try { S.token = sessionStorage.getItem(TOKEN_KEY); } catch (e) {}
+  if (S.token) start(); else showLogin();
+})();
+</script>
