@@ -56,7 +56,8 @@
   function yen(n) { return '¥' + Number(n || 0).toLocaleString('ja-JP'); }
 
   /* ---------- 初期化 ---------- */
-  call('api_bootstrap').then(function (boot) {
+  // サーバーがHTMLに埋め込んだ初期データがあれば、通信せずにすぐ表示する
+  (window.__BOOT__ ? Promise.resolve(window.__BOOT__) : call('api_bootstrap')).then(function (boot) {
     state.boot = boot;
     renderCategories();
     var last = recall();
@@ -402,6 +403,7 @@
           state.files.splice(state.files.indexOf(item), 1);
         } else {
           item.data = res.data; item.mimeType = res.mimeType; item.name = res.name; item.preview = res.preview;
+          startUpload(item); // 選んだ時点で裏でアップロードしておく
         }
         item.loading = false;
         renderThumbs();
@@ -410,6 +412,36 @@
         state.files.splice(state.files.indexOf(item), 1);
         renderThumbs();
       });
+    });
+  }
+
+  /** 1ファイルを先行アップロード。成功すると item.fileId が入る */
+  function startUpload(item) {
+    item.status = 'uploading';
+    item.error = '';
+    item.promise = call('api_uploadReceipt', { name: item.name, mimeType: item.mimeType, data: item.data })
+      .then(function (res) {
+        item.fileId = res.id;
+        item.status = 'done';
+        item.data = null; // 送信済みなのでメモリから解放
+      })
+      .catch(function (err) {
+        item.status = 'error';
+        item.error = err && err.message ? err.message : String(err);
+      })
+      .then(renderThumbs);
+    return item.promise;
+  }
+
+  /** 送信前に、アップロード中のものを待ち、失敗したものは1回だけ再送する */
+  function ensureUploaded() {
+    var pending = state.files.filter(function (f) { return f.status === 'uploading'; }).map(function (f) { return f.promise; });
+    return Promise.all(pending).then(function () {
+      var failed = state.files.filter(function (f) { return f.status === 'error' && f.data; });
+      return Promise.all(failed.map(startUpload));
+    }).then(function () {
+      var ng = state.files.filter(function (f) { return f.status !== 'done'; });
+      if (ng.length) throw new Error('レシート画像を送信できませんでした（' + ng.map(function (f) { return f.name; }).join('、') + '）。通信環境を確認して、もう一度お試しください。' + (ng[0].error ? '\n' + ng[0].error : ''));
     });
   }
 
@@ -452,8 +484,13 @@
     if (!box) return;
     box.innerHTML = '';
     state.files.forEach(function (f, i) {
+      var badge = f.status === 'uploading' ? el('span', { class: 'thumb__badge', text: '送信中…' })
+        : f.status === 'error' ? el('button', { type: 'button', class: 'thumb__badge thumb__badge--ng', text: '失敗・再送',
+          onclick: function () { if (f.data) startUpload(f); renderThumbs(); } })
+        : f.status === 'done' ? el('span', { class: 'thumb__badge thumb__badge--ok', text: '✓' }) : null;
       var t = el('div', { class: 'thumb', title: f.name }, [
         f.loading ? '処理中…' : (f.preview ? el('img', { src: f.preview, alt: f.name }) : '📄 ' + f.name),
+        badge,
         el('button', { type: 'button', class: 'thumb__remove', 'aria-label': f.name + 'を削除', text: '×',
           onclick: function () { state.files.splice(i, 1); renderThumbs(); } })
       ]);
@@ -517,14 +554,18 @@
     }
     $('formErrors').hidden = true;
 
-    var payload = {
-      category: state.category.name,
-      values: values,
-      files: state.files.map(function (f) { return { name: f.name, mimeType: f.mimeType, data: f.data }; })
-    };
     $('overlay').hidden = false;
     $('submitBtn').disabled = true;
-    call('api_submit', payload).then(function (res) {
+    var waiting = state.files.some(function (f) { return f.status !== 'done'; });
+    $('overlayText').textContent = waiting ? 'レシート画像を送信中…' : '送信中…';
+    ensureUploaded().then(function () {
+      $('overlayText').textContent = '送信中…';
+      return call('api_submit', {
+        category: state.category.name,
+        values: values,
+        uploads: state.files.map(function (f) { return f.fileId; })
+      });
+    }).then(function (res) {
       var payers = recall().payer || {};
       payers[state.category.name] = values.payerId;
       remember({ payer: payers });
