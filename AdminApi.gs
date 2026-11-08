@@ -233,6 +233,7 @@ function api_getConfig(token) {
     accounts: form_getAccounts_(ss, true),
     taxes: form_getTaxes_(ss, true),
     categories: form_getCategories_(ss, true),
+    vendors: form_getVendors_(ss, true),
     fieldTypes: FIELD_TYPES,
     systemFields: SYSTEM_FIELD_KEYS,
     adminEmails: PropertiesService.getScriptProperties().getProperty('ADMIN_EMAILS') || ''
@@ -370,9 +371,9 @@ function api_saveFields(token, fields) {
 function api_saveMaster(token, name, rows) {
   var who = requireAuth_(token);
   var ss = getHomeSpreadsheet_();
-  var def = { accounts: TABLES.accounts, taxes: TABLES.taxes, categories: TABLES.categories }[name];
+  var def = { accounts: TABLES.accounts, taxes: TABLES.taxes, categories: TABLES.categories, vendors: TABLES.vendors }[name];
   if (!def) throw new Error('不正なマスタ名です');
-  var keyField = name === 'categories' ? 'name' : 'label';
+  var keyField = name === 'categories' || name === 'vendors' ? 'name' : 'label';
   var seen = {};
   var clean = (rows || []).map(function (r, i) {
     var k = String(r[keyField] || '').trim();
@@ -393,10 +394,52 @@ function api_saveMaster(token, name, rows) {
       if (isNaN(o.rate) || o.rate < 0 || o.rate > 100) throw new Error('「' + k + '」の税率が不正です');
     }
     if (name === 'accounts' && !String(o.freeeName).trim()) o.freeeName = k.replace(/（.*$/, '');
+    if (name === 'vendors') {
+      o.invoiceNumber = util_normalizeInvoice_(o.invoiceNumber);
+      if (o.invoiceNumber && !/^T\d{13}$/.test(o.invoiceNumber)) throw new Error('「' + k + '」の登録番号は「T」+13桁の数字で入力してください');
+      if (!String(o.categories).trim()) o.categories = 'ALL';
+    }
     return o;
   });
-  if (!clean.length) throw new Error('1件以上登録してください');
+  if (!clean.length && name !== 'vendors') throw new Error('1件以上登録してください');
   table_replaceAll_(ss, def, clean);
   log_write_(ss, who, 'マスタ変更:' + def.sheet, clean.length + '件');
   return true;
+}
+
+/**
+ * 支払先マスタの候補：過去の申請から、まだ登録されていない支払先を利用回数順に返す。
+ * 勘定科目・税率・登録番号は、その支払先で一番多く使われたものを採用。
+ */
+function api_vendorCandidates(token) {
+  requireAuth_(token);
+  var c = ctx_();
+  var registered = {};
+  form_getVendors_(c.ss, true).forEach(function (v) { registered[vendor_key_(v.name)] = true; });
+  var groups = {};
+  records_readAll_(c.sheet).forEach(function (r) {
+    if (r.status === STATUS.REJECTED) return;
+    var name = String(r.vendor || '').trim();
+    var key = vendor_key_(name);
+    if (!key || registered[key]) return;
+    var g = groups[key] = groups[key] || { name: name, count: 0, accounts: {}, taxes: {}, invoices: {}, categories: {} };
+    g.count++;
+    [['accounts', r.accountItem], ['taxes', r.taxRateLabel], ['invoices', util_normalizeInvoice_(r.invoiceNumber)], ['categories', r.category]]
+      .forEach(function (p) { if (p[1]) g[p[0]][p[1]] = (g[p[0]][p[1]] || 0) + 1; });
+  });
+  function top(o) {
+    return Object.keys(o).sort(function (a, b) { return o[b] - o[a]; })[0] || '';
+  }
+  return Object.keys(groups).map(function (k) { return groups[k]; })
+    .sort(function (a, b) { return b.count - a.count; })
+    .slice(0, 50)
+    .map(function (g) {
+      var cats = Object.keys(g.categories);
+      return { name: g.name, keywords: '', invoiceNumber: top(g.invoices), accountItem: top(g.accounts), taxRateLabel: top(g.taxes),
+        categories: cats.length === 1 ? cats[0] : 'ALL', note: '過去の申請 ' + g.count + '件', enabled: true, count: g.count };
+    });
+}
+
+function vendor_key_(name) {
+  return String(name || '').normalize('NFKC').toLowerCase().replace(/\s/g, '');
 }
