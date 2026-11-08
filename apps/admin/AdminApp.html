@@ -730,6 +730,20 @@
         { key: 'color', label: '表示色', type: 'color' },
         { key: 'enabled', label: '有効', type: 'bool' }
       ]
+    },
+    vendors: {
+      title: '支払先マスタ（よく使う支払先）',
+      help: '申請画面の「支払先/店名」で選ぶと、登録番号・勘定科目・税率が自動で入ります（申請者が後から変更も可）。検索キーワードには略称や読み（例：ろーそん, LAWSON）をカンマ区切りで。対象所属区分は ALL / KIKKAKE / TIE Coffee。',
+      cols: [
+        { key: 'name', label: '支払先名', width: '20%' },
+        { key: 'keywords', label: '検索キーワード' },
+        { key: 'invoiceNumber', label: '登録番号（T+13桁）' },
+        { key: 'accountItem', label: '勘定科目', type: 'account' },
+        { key: 'taxRateLabel', label: '税率', type: 'tax' },
+        { key: 'categories', label: '対象所属区分', list: true },
+        { key: 'note', label: 'メモ' },
+        { key: 'enabled', label: '有効', type: 'bool' }
+      ]
     }
   };
 
@@ -745,6 +759,7 @@
     var def = MASTER_DEFS[S.master];
     $('masterTitle').textContent = def.title;
     $('masterHelp').textContent = def.help;
+    $('vendorCandidates').hidden = S.master !== 'vendors';
     S.masterRows = S.config[S.master].map(function (r) {
       var o = JSON.parse(JSON.stringify(r));
       def.cols.forEach(function (c) { if (c.list && Array.isArray(o[c.key])) o[c.key] = o[c.key].join(','); });
@@ -762,12 +777,14 @@
     })).concat([el('th', { text: '' })]))]));
     var tb = el('tbody');
     var taxLabels = S.config.taxes.map(function (x) { return x.label; });
+    var accountLabels = S.config.accounts.map(function (x) { return x.label; });
     S.masterRows.forEach(function (r, i) {
       function move(d) { var j = i + d; if (j < 0 || j >= S.masterRows.length) return; var tmp = S.masterRows[i]; S.masterRows[i] = S.masterRows[j]; S.masterRows[j] = tmp; drawMaster(); }
       var cells = def.cols.map(function (c) {
         var input;
         if (c.type === 'bool') input = el('input', { type: 'checkbox', checked: r[c.key] !== false, onchange: function (e) { r[c.key] = e.target.checked; } });
         else if (c.type === 'tax') input = options(el('select', { onchange: function (e) { r[c.key] = e.target.value; } }), taxLabels, r[c.key], '');
+        else if (c.type === 'account') input = options(el('select', { onchange: function (e) { r[c.key] = e.target.value; } }), accountLabels, r[c.key], '');
         else if (c.type === 'color') input = el('input', { type: 'color', value: r[c.key] || '#2a78d6', oninput: function (e) { r[c.key] = e.target.value; } });
         else input = el('input', { type: c.type === 'number' ? 'number' : 'text', value: r[c.key], oninput: function (e) { r[c.key] = e.target.value; } });
         input.setAttribute('aria-label', c.label);
@@ -787,9 +804,24 @@
     var row = { enabled: true };
     if (S.master === 'accounts') row.categories = 'ALL';
     if (S.master === 'taxes') row.rate = 10;
+    if (S.master === 'vendors') row.categories = 'ALL';
     S.masterRows.push(row);
     drawMaster();
   });
+  $('vendorCandidates').addEventListener('click', function () {
+    busy(true);
+    api('api_vendorCandidates').then(function (list) {
+      busy(false);
+      var have = {};
+      S.masterRows.forEach(function (r) { have[String(r.name || '').normalize('NFKC').toLowerCase().replace(/\s/g, '')] = true; });
+      var add = list.filter(function (v) { return !have[v.name.normalize('NFKC').toLowerCase().replace(/\s/g, '')]; });
+      if (!add.length) { toast('追加できる候補はありません（過去の申請の支払先はすべて登録済みです）'); return; }
+      add.forEach(function (v) { delete v.count; S.masterRows.push(v); });
+      drawMaster();
+      toast(add.length + '件の候補を追加しました。内容を確認し、不要な行を削除してから「保存」してください');
+    }).catch(fail);
+  });
+
   $('saveMaster').addEventListener('click', function () {
     busy(true);
     api('api_saveMaster', S.master, S.masterRows).then(function () {
