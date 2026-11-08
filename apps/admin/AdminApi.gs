@@ -34,7 +34,7 @@ function api_overview(token) {
     homeUrl: ss.getUrl(),
     applicantUrl: settings.APPLICANT_APP_URL || '',
     categories: form_getCategories_(ss, true).map(function (c) { return { name: c.name, color: c.color }; }),
-    statuses: [STATUS.PENDING, STATUS.APPROVED, STATUS.REJECTED, STATUS.EXPORTED],
+    statuses: [STATUS.PENDING, STATUS.APPROVED, STATUS.REJECTED, STATUS.EXPORTED, STATUS.ARCHIVED],
     accounts: form_getAccounts_(ss, true).map(function (a) { return { label: a.label, categories: a.categories }; }),
     taxes: form_getTaxes_(ss, true).map(function (t) { return { label: t.label, rate: t.rate }; }),
     invoiceOptions: [INVOICE_QUALIFIED, INVOICE_NON_QUALIFIED],
@@ -55,7 +55,7 @@ function api_dashboard(token, f) {
   var from = f.from || '0000-00', to = f.to || '9999-99';
   var rows = all.filter(function (r) {
     var m = monthOf_(r.paymentDate);
-    return m >= from && m <= to && r.status !== STATUS.REJECTED && (!f.category || r.category === f.category);
+    return m >= from && m <= to && r.status !== STATUS.REJECTED && r.status !== STATUS.ARCHIVED && (!f.category || r.category === f.category);
   });
 
   // 月の並び
@@ -133,7 +133,7 @@ function api_listRecords(token, f) {
     if (f.from && d < f.from) return false;
     if (f.to && d > f.to) return false;
     if (f.category && r.category !== f.category) return false;
-    if (f.status && r.status !== f.status) return false;
+    if (f.status ? r.status !== f.status : r.status === STATUS.ARCHIVED) return false; // 「すべて」はアーカイブを除く
     if (q) {
       var hay = [r.id, r.payerName, r.payerId, r.vendor, r.description, r.accountItem].join(' ').toLowerCase();
       if (hay.indexOf(q) < 0) return false;
@@ -155,10 +155,14 @@ function api_setStatus(token, ids, status, comment) {
   if (allowed.indexOf(status) < 0) throw new Error('不正なステータスです');
   if (status === STATUS.REJECTED && !comment) throw new Error('差戻し理由を入力してください');
   var c = ctx_();
+  // アーカイブ済みは「元に戻す」でしか変更しない
+  var archived = {};
+  records_readAll_(c.sheet).forEach(function (r) { if (r.status === STATUS.ARCHIVED) archived[r.id] = true; });
+  ids = (ids || []).filter(function (id) { return !archived[id]; });
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    (ids || []).forEach(function (id) {
+    ids.forEach(function (id) {
       var patch = { status: status, reviewer: who, reviewedAt: new Date() };
       if (comment != null) patch.reviewComment = comment;
       records_update_(c.sheet, id, patch);
@@ -166,8 +170,73 @@ function api_setStatus(token, ids, status, comment) {
   } finally {
     lock.releaseLock();
   }
-  log_write_(c.ss, who, 'ステータス変更:' + status, (ids || []).join(','));
-  return (ids || []).length;
+  log_write_(c.ss, who, 'ステータス変更:' + status, ids.join(','));
+  return ids.length;
+}
+
+/* ---------------- アーカイブ（削除の代わり。元に戻せる） ---------------- */
+
+/**
+ * 誤申請などをアーカイブする。データ・領収書ファイルは残したまま、
+ * ダッシュボード・月次精算書・freee連携・支払先候補の対象から外す。
+ * @return {{count:number, warnings:string[]}}
+ */
+function api_archiveRecords(token, ids, reason) {
+  var who = requireAuth_(token);
+  if (!ids || !ids.length) throw new Error('アーカイブする申請を選択してください');
+  var c = ctx_();
+  var byId = {};
+  records_readAll_(c.sheet).forEach(function (r) { byId[r.id] = r; });
+  var warnings = [];
+  var count = 0;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ids.forEach(function (id) {
+      var r = byId[id];
+      if (!r || r.status === STATUS.ARCHIVED) return;
+      if (r.status === STATUS.EXPORTED || r.freeeDealId) warnings.push(r.payerName + ' ' + r.paymentDate + '：freeeに登録済みです。freee側の取引は残るので、必要ならfreeeで削除してください');
+      else if (r.statementId) warnings.push(r.payerName + ' ' + r.paymentDate + '：精算書（' + r.statementId + '）に載っています。精算書を作り直すと外れます');
+      records_update_(c.sheet, id, {
+        status: STATUS.ARCHIVED,
+        statusBeforeArchive: r.status,
+        archivedAt: new Date(),
+        archivedBy: who,
+        archiveReason: String(reason || '').trim()
+      });
+      count++;
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  log_write_(c.ss, who, 'アーカイブ', ids.join(',') + (reason ? ' 理由:' + reason : ''));
+  return { count: count, warnings: warnings };
+}
+
+/** アーカイブを取り消し、アーカイブ前のステータスに戻す */
+function api_restoreRecords(token, ids) {
+  var who = requireAuth_(token);
+  if (!ids || !ids.length) throw new Error('元に戻す申請を選択してください');
+  var c = ctx_();
+  var byId = {};
+  records_readAll_(c.sheet).forEach(function (r) { byId[r.id] = r; });
+  var count = 0;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ids.forEach(function (id) {
+      var r = byId[id];
+      if (!r || r.status !== STATUS.ARCHIVED) return;
+      var back = [STATUS.PENDING, STATUS.APPROVED, STATUS.REJECTED, STATUS.EXPORTED].indexOf(r.statusBeforeArchive) >= 0
+        ? r.statusBeforeArchive : STATUS.PENDING;
+      records_update_(c.sheet, id, { status: back, statusBeforeArchive: '', archivedAt: '', archivedBy: '', archiveReason: '' });
+      count++;
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  log_write_(c.ss, who, 'アーカイブ取り消し', ids.join(','));
+  return { count: count };
 }
 
 /** 管理者による申請内容の修正（勘定科目の付け替えなど） */
@@ -421,7 +490,7 @@ function api_vendorCandidates(token) {
   form_getVendors_(c.ss, true).forEach(function (v) { registered[vendor_key_(v.name)] = true; });
   var groups = {};
   records_readAll_(c.sheet).forEach(function (r) {
-    if (r.status === STATUS.REJECTED) return;
+    if (r.status === STATUS.REJECTED || r.status === STATUS.ARCHIVED) return;
     var name = String(r.vendor || '').trim();
     var key = vendor_key_(name);
     if (!key || registered[key]) return;

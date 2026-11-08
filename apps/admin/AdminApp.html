@@ -122,7 +122,7 @@
       $('previewLink').href = ov.applicantUrl || '#';
       var cats = ov.categories.map(function (c) { return c.name; });
       ['dCategory', 'rCategory', 'fCategory'].forEach(function (id) { options($(id), cats, $(id).value, 'すべて'); });
-      options($('rStatus'), ov.statuses, $('rStatus').value || '申請中', 'すべて');
+      options($('rStatus'), ov.statuses, $('rStatus').value || '申請中', 'すべて（アーカイブ除く）');
       busy(false);
       if (!$('dFrom').value) setRange('6m', true);
       if (!$('rFrom').value) {
@@ -344,8 +344,33 @@
 
   function updateBulk() {
     var n = Object.keys(S.selected).length;
-    ['bulkApprove', 'bulkReject', 'bulkPending'].forEach(function (id) { $(id).disabled = !n; });
+    var archivedView = $('rStatus').value === 'アーカイブ';
+    ['bulkApprove', 'bulkReject', 'bulkPending', 'bulkArchive'].forEach(function (id) { $(id).disabled = !n; $(id).hidden = archivedView; });
+    $('bulkRestore').hidden = !archivedView;
+    $('bulkRestore').disabled = !n;
     $('bulkApprove').textContent = n ? '選択した' + n + '件を承認' : '選択を承認';
+    $('bulkRestore').textContent = n ? '選択した' + n + '件を元に戻す' : '選択を元に戻す';
+  }
+
+  /** アーカイブ（理由は任意）。キャンセルしたら何もしない */
+  function archiveRecords(ids) {
+    var reason = prompt(ids.length + '件をアーカイブします。\nダッシュボード・精算書・freee連携の対象から外れます（データは残り、あとで元に戻せます）。\n\n理由（任意）：', '誤申請');
+    if (reason === null) return Promise.resolve(false);
+    busy(true);
+    return api('api_archiveRecords', ids, reason).then(function (res) {
+      busy(false); invalidate();
+      toast(res.count + '件をアーカイブしました。ステータス「アーカイブ」で確認・元に戻せます');
+      if (res.warnings.length) alert('確認してください：\n' + res.warnings.join('\n'));
+      return true;
+    });
+  }
+  function restoreRecords(ids) {
+    busy(true);
+    return api('api_restoreRecords', ids).then(function (res) {
+      busy(false); invalidate();
+      toast(res.count + '件を元に戻しました');
+      return true;
+    });
   }
 
   function renderRecordTable() {
@@ -368,7 +393,7 @@
         onchange: function (e) { if (e.target.checked) S.selected[r.id] = true; else delete S.selected[r.id]; updateBulk(); } });
       var dot = el('span', { class: 'dot' }); dot.style.setProperty('--c', catColor(r.category));
       var urls = String(r.receiptUrls || '').split('\n').filter(String);
-      tb.appendChild(el('tr', { onclick: function () { openDetail(r.id); } }, [
+      tb.appendChild(el('tr', { class: r.status === 'アーカイブ' ? 'is-archived' : '', onclick: function () { openDetail(r.id); } }, [
         el('td', {}, [cb]),
         el('td', {}, [statusBadge(r.status)]),
         el('td', { class: 'nowrap', text: String(r.paymentDate || '').replace(/-/g, '/') }),
@@ -401,6 +426,8 @@
   }
   $('bulkApprove').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '承認済').then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
   $('bulkReject').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '差戻し').then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
+  $('bulkArchive').addEventListener('click', function () { archiveRecords(Object.keys(S.selected)).then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
+  $('bulkRestore').addEventListener('click', function () { restoreRecords(Object.keys(S.selected)).then(function () { return loadRecords(true); }).catch(fail); });
   $('bulkPending').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '申請中').then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
 
   /* ---------- 詳細モーダル ---------- */
@@ -443,6 +470,14 @@
     try { extra = r.extra ? Object.entries(JSON.parse(r.extra)).map(function (kv) { return kv[0] + '：' + kv[1]; }).join(' ／ ') : ''; } catch (e) { extra = r.extra; }
 
     body.appendChild(el('div', {}, [statusBadge(r.status)]));
+    var isArchived = r.status === 'アーカイブ';
+    if (isArchived) {
+      body.appendChild(el('div', { class: 'archived-note', text:
+        'この申請はアーカイブされています（' + (r.archivedAt || '') + '・' + (r.archivedBy || '') + '）' +
+        (r.archiveReason ? '\n理由：' + r.archiveReason : '') +
+        '\n元に戻すと「' + (r.statusBeforeArchive || '申請中') + '」に戻ります。' }));
+      body.lastChild.style.whiteSpace = 'pre-line';
+    }
     body.appendChild(el('div', { class: 'receipts' }, urls.length ? urls.map(function (u, i) {
       return el('a', { class: 'btn btn--sm', href: u, target: '_blank', rel: 'noopener', text: '📎 領収書' + (urls.length > 1 ? i + 1 : '') + 'を開く' });
     }) : [el('span', { class: 'muted', text: '領収書なし' })]));
@@ -465,7 +500,15 @@
       return v;
     }
     function after() { closeModal(); invalidate(); return loadRecords(true); }
-    body.appendChild(el('div', { class: 'btn-row' }, [
+    body.appendChild(el('div', { class: 'btn-row' }, isArchived ? [
+      el('button', { class: 'btn btn--primary', text: '元に戻す', onclick: function () {
+        restoreRecords([r.id]).then(after).catch(fail);
+      } }),
+      el('button', { class: 'btn', text: '修正内容を保存', onclick: function () {
+        busy(true);
+        api('api_updateRecord', r.id, collect()).then(function () { busy(false); toast('保存しました'); return after(); }).catch(fail);
+      } })
+    ] : [
       el('button', { class: 'btn', text: '修正内容を保存', onclick: function () {
         busy(true);
         api('api_updateRecord', r.id, collect()).then(function () { busy(false); toast('保存しました'); return after(); }).catch(fail);
@@ -479,7 +522,10 @@
       } }),
       r.status !== '申請中' ? el('button', { class: 'btn btn--ghost', text: '申請中に戻す', onclick: function () {
         changeStatus([r.id], '申請中').then(after).catch(fail);
-      } }) : null
+      } }) : null,
+      el('button', { class: 'btn btn--ghost btn--danger', text: 'アーカイブ', title: '誤申請などを集計から外します（元に戻せます）', onclick: function () {
+        archiveRecords([r.id]).then(function (ok) { if (ok) return after(); }).catch(fail);
+      } })
     ]));
     $('modal').hidden = false;
   }
