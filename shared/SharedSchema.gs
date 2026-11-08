@@ -62,6 +62,8 @@ var RECORD_COLUMNS = [
   { key: 'freeeReceiptIds', label: 'freee証憑ID' },
   { key: 'freeeExportedAt', label: 'freee連携日時' },
   { key: 'freeeExportBatch', label: 'freee出力バッチ' },
+  { key: 'statementId', label: '精算書番号' },
+  { key: 'statementUrl', label: '精算書URL' },
   { key: 'extra', label: 'カスタム項目(JSON)' },
   { key: 'updatedAt', label: '更新日時' }
 ];
@@ -242,8 +244,11 @@ var DEFAULT_SETTINGS = [
   ['DATA_SPREADSHEET_ID', '', '経費データの保存先スプレッドシートID（空欄 = このスプレッドシート）'],
   ['DATA_SHEET_NAME', SHEETS.RECORDS, '経費データの保存先シート名'],
   ['RECEIPT_FOLDER_ID', '', '領収書の保存先フォルダID（共有ドライブ可）'],
-  ['RECEIPT_SUBFOLDER_MODE', '月別', 'なし / 月別 / 月別+所属区分'],
-  ['RECEIPT_SUBFOLDER_FORMAT', 'yyyy年MM月_経費精算', '月別フォルダ名の書式（支払日基準）'],
+  ['RECEIPT_SUBFOLDER_MODE', '月別+支払者', 'フォルダの分け方：なし / 月別 / 月別+所属区分 / 月別+支払者（＝月フォルダの中に「社員ID_氏名」フォルダ）'],
+  ['RECEIPT_SUBFOLDER_FORMAT', 'yyyy年MM月_経費精算', '月別フォルダ名の書式'],
+  ['RECEIPT_MONTH_BASIS', '支払日', 'どの月のフォルダ・精算書に入れるか：支払日 / 申請日（会計上は支払日がおすすめ）'],
+  ['STATEMENT_INCLUDE_PENDING', 'いいえ', '精算書に「申請中」（未承認）も含めるか：はい / いいえ'],
+  ['STATEMENT_AUTO_DAY', '5', '精算書を自動作成する日（毎月この日に前月分を作成。自動作成は管理画面でオン/オフ）'],
   ['EMPLOYEE_SPREADSHEET_ID', '1yIZ5WyJ-4IYqdoie_f1YpgArGjwvp6uVzlAz-4LbZyk', '従業員マスタのスプレッドシートID'],
   ['EMPLOYEE_SHEET_NAME', '従業員', '従業員マスタのシート名'],
   ['EMPLOYEE_ID_COLUMN', '社員ID', '従業員マスタ：IDの列名'],
@@ -260,5 +265,6 @@ var DEFAULT_SETTINGS = [
   ['FREEE_CARD_ACCOUNT', '', '「会社カード」の決済口座名（freeeの口座名。空欄 = 未決済）'],
   ['FREEE_CASH_ACCOUNT', '', '「会社の現金」の決済口座名（例：現金・小口現金。空欄 = 未決済）'],
   ['FREEE_CSV_ENCODING', 'UTF-8', 'freee取込CSVの文字コード：UTF-8 / Shift_JIS'],
+  ['FREEE_GROUPING', '精算書ごと', 'freeeへの登録単位：精算書ごと（支払者×月でまとめる）/ 申請ごと'],
   ['FREEE_PARTNER_MODE', '支払先', 'freee取引先に入れる値：支払先 / 支払者 / なし']
 ];

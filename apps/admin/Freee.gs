@@ -23,9 +23,13 @@ function freee_targets_(sheet, opts) {
   var ids = opts.ids && opts.ids.length ? opts.ids : null;
   return records_readAll_(sheet).filter(function (r) {
     if (ids) return ids.indexOf(r.id) >= 0;
-    var d = String(r.paymentDate || '').replace(/\//g, '-');
-    if (opts.from && d < opts.from) return false;
-    if (opts.to && d > opts.to) return false;
+    if (opts.month) {
+      if (drive_recordMonth_(opts.settings || {}, r) !== opts.month) return false;
+    } else {
+      var d = String(r.paymentDate || '').replace(/\//g, '-');
+      if (opts.from && d < opts.from) return false;
+      if (opts.to && d > opts.to) return false;
+    }
     if (opts.category && r.category !== opts.category) return false;
     return r.status === STATUS.APPROVED || (opts.includeExported && r.status === STATUS.EXPORTED);
   }).sort(function (a, b) { return String(a.paymentDate).localeCompare(String(b.paymentDate)); });
@@ -51,6 +55,59 @@ function freee_memo_(r) {
     r.invoiceNumber ? '登録番号:' + r.invoiceNumber : ''].filter(String).join(' / ');
 }
 
+/* ---------------- 精算書ごとのまとめ ---------------- */
+
+function freee_grouping_(settings, opts) {
+  return (opts && opts.grouping) || settings.FREEE_GROUPING || '精算書ごと';
+}
+
+function freee_monthEnd_(month) {
+  var y = Number(month.slice(0, 4)), m = Number(month.slice(5, 7));
+  return util_formatDate_(new Date(y, m, 0, 12), 'yyyy-MM-dd');
+}
+
+/**
+ * 精算書ごと（支払者×月）にまとめる。
+ * 1精算書 = freee 1取引。明細行は「勘定科目×税区分×部門×決済口座」ごとに合算。
+ */
+function freee_statementUnits_(settings, targets) {
+  var missing = targets.filter(function (r) { return !r.statementId; });
+  if (missing.length) {
+    throw new Error('月次精算書が未作成の申請が ' + missing.length + ' 件あります（' +
+      missing.slice(0, 3).map(function (r) { return r.payerName + ' ' + r.paymentDate; }).join('、') +
+      (missing.length > 3 ? ' ほか' : '') + '）。先に「月次精算書」タブで作成してください。');
+  }
+  var units = {}, order = [];
+  targets.forEach(function (r) {
+    var u = units[r.statementId];
+    if (!u) {
+      var month = drive_recordMonth_(settings, r);
+      u = units[r.statementId] = {
+        ref: r.statementId, month: month, issueDate: freee_monthEnd_(month), payerName: r.payerName, payerId: r.payerId,
+        category: r.category, statementUrl: r.statementUrl, records: [], lines: {}, lineOrder: []
+      };
+      order.push(r.statementId);
+    }
+    u.records.push(r);
+    var settle = freee_settlementAccount_(settings, r.paymentMethod);
+    var lk = [r.freeeAccountItem || r.accountItem, r.freeeTaxName, r.department || '', settle, r.accountItem, r.taxRateLabel, r.invoiceType].join('\u0001');
+    if (!u.lines[lk]) {
+      u.lines[lk] = { account: r.freeeAccountItem || r.accountItem, accountLabel: r.accountItem, taxName: r.freeeTaxName,
+        taxLabel: r.taxRateLabel, invoiceType: r.invoiceType, department: r.department || '', settle: settle, amount: 0, tax: 0, count: 0 };
+      u.lineOrder.push(lk);
+    }
+    var line = u.lines[lk];
+    line.amount += Number(r.amount) || 0; line.tax += Number(r.taxAmount) || 0; line.count++;
+  });
+  return order.map(function (k) {
+    var u = units[k];
+    u.lines = u.lineOrder.map(function (lk) { return u.lines[lk]; });
+    u.memo = '精算書 ' + u.ref + ' ' + u.month.replace('-', '年') + '月分 ' + u.payerName + ' ' + u.records.length + '件' +
+      (u.statementUrl ? ' ' + u.statementUrl : '');
+    return u;
+  });
+}
+
 /* ---------------- 方式A：CSV ---------------- */
 
 /** 承認済みデータを freee「取引のインポート」用CSVにして Drive に保存 */
@@ -59,20 +116,36 @@ function api_freeeExportCsv(token, opts) {
   opts = opts || {};
   var c = ctx_();
   var s = c.settings;
+  opts.settings = s;
   var targets = freee_targets_(c.sheet, opts);
   if (!targets.length) throw new Error('出力対象（承認済）のデータがありません');
+  var grouping = freee_grouping_(s, opts);
 
   var rows = [FREEE_CSV_HEADER];
-  targets.forEach(function (r) {
-    var settle = freee_settlementAccount_(s, r.paymentMethod);
-    var date = String(r.paymentDate).replace(/-/g, '/');
-    rows.push([
-      '支出', r.id, date, '', '', freee_partner_(s, r), r.freeeAccountItem || r.accountItem, r.freeeTaxName,
-      r.amount, '内税', r.taxAmount, freee_memo_(r), '', r.department || '',
-      [r.category, r.payerName].filter(String).join(','),
-      settle ? date : '', settle, settle ? r.amount : ''
-    ]);
-  });
+  if (grouping === '精算書ごと') {
+    freee_statementUnits_(s, targets).forEach(function (u) {
+      var date = u.issueDate.replace(/-/g, '/');
+      var partner = (s.FREEE_PARTNER_MODE || '支払先') === 'なし' ? '' : u.payerName;
+      u.lines.forEach(function (l) {
+        rows.push([
+          '支出', u.ref, date, '', '', partner, l.account, l.taxName, l.amount, '内税', l.tax,
+          u.memo + '（' + l.count + '件）', '', l.department, [u.category, u.payerName].filter(String).join(','),
+          l.settle ? date : '', l.settle, l.settle ? l.amount : ''
+        ]);
+      });
+    });
+  } else {
+    targets.forEach(function (r) {
+      var settle = freee_settlementAccount_(s, r.paymentMethod);
+      var date = String(r.paymentDate).replace(/-/g, '/');
+      rows.push([
+        '支出', r.id, date, '', '', freee_partner_(s, r), r.freeeAccountItem || r.accountItem, r.freeeTaxName,
+        r.amount, '内税', r.taxAmount, freee_memo_(r), '', r.department || '',
+        [r.category, r.payerName].filter(String).join(','),
+        settle ? date : '', settle, settle ? r.amount : ''
+      ]);
+    });
+  }
   var csv = rows.map(function (row) {
     return row.map(function (v) {
       var str = String(v == null ? '' : v);
@@ -106,6 +179,8 @@ function api_freeeExportCsv(token, opts) {
   log_write_(c.ss, who, 'freee CSV出力', batch + ' ' + targets.length + '件');
   return {
     count: targets.length,
+    rows: rows.length - 1,
+    grouping: grouping,
     total: targets.reduce(function (sum, r) { return sum + (Number(r.amount) || 0); }, 0),
     batch: batch,
     url: url,
@@ -255,75 +330,96 @@ function api_freeeSyncMasters(token) {
 }
 
 /**
- * 承認済みの申請を freee に取引として登録（領収書はファイルボックスに証憑として添付）
- * GASの実行時間制限（6分）対策として1回あたり最大20件。残りは画面側で再実行します。
+ * 承認済みの申請を freee に取引として登録
+ *  ・精算書ごと：1精算書 = 1取引（明細は勘定科目×税区分×部門ごと）。精算書PDFを証憑として添付
+ *  ・申請ごと　：1申請 = 1取引。領収書画像を証憑として添付
+ * GASの実行時間制限（6分）対策として1回あたり最大20取引。残りは画面側で再実行します。
  */
 function api_freeeSendDeals(token, opts) {
   var who = requireAuth_(token);
   opts = opts || {};
   var c = ctx_();
   var s = c.settings;
+  opts.settings = s;
   var companyId = freee_companyId_(s);
   var accounts = form_getAccounts_(c.ss, true);
   var taxes = form_getTaxes_(c.ss, true);
   var sections = JSON.parse(freee_props_().getProperty('FREEE_SECTIONS') || '[]');
+  var grouping = freee_grouping_(s, opts);
 
-  var targets = freee_targets_(c.sheet, opts).filter(function (r) { return !r.freeeDealId; });
-  var batchSize = 20;
+  function detailFor(accountLabel, freeeAccount, taxLabel, invoiceType, department, amount, description) {
+    var acc = accounts.filter(function (a) { return a.label === accountLabel || a.freeeName === freeeAccount; })[0];
+    if (!acc || !acc.freeeId) throw new Error('勘定科目「' + freeeAccount + '」のIDが未設定です（マスタ同期を実行してください）');
+    var tax = taxes.filter(function (t) { return t.label === taxLabel; })[0];
+    if (!tax) throw new Error('税区分「' + taxLabel + '」が見つかりません');
+    var qualified = invoiceType ? invoiceType === INVOICE_QUALIFIED : true;
+    var taxCode = qualified ? tax.freeeCode : (tax.freeeCodeNonQualified !== '' ? tax.freeeCodeNonQualified : tax.freeeCode);
+    if (taxCode === '' || taxCode == null) throw new Error('税区分コードが未設定です（マスタ同期を実行してください）');
+    var d = { account_item_id: Number(acc.freeeId), tax_code: Number(taxCode), amount: Number(amount), description: String(description).slice(0, 250) };
+    var section = sections.filter(function (x) { return x.name === department; })[0];
+    if (section) d.section_id = section.id;
+    return d;
+  }
+  function upload(fileId, description, issueDate) {
+    var blob = DriveApp.getFileById(fileId).getBlob();
+    return freee_fetch_('post', '/api/1/receipts', {
+      form: { company_id: String(companyId), receipt: blob, description: description, issue_date: issueDate }
+    }).receipt.id;
+  }
+
+  // 登録単位をつくる
+  var pending = freee_targets_(c.sheet, opts).filter(function (r) { return !r.freeeDealId; });
+  var units;
+  if (grouping === '精算書ごと') {
+    units = freee_statementUnits_(s, pending).map(function (u) {
+      return {
+        ref: u.ref, issueDate: u.issueDate, records: u.records,
+        details: function () {
+          return u.lines.map(function (l) { return detailFor(l.accountLabel, l.account, l.taxLabel, l.invoiceType, l.department, l.amount, u.memo); });
+        },
+        receipts: function () {
+          var m = String(u.statementUrl || '').match(/\/d\/([-\w]{20,})/);
+          if (!m) throw new Error('精算書PDFが見つかりません（精算書を作り直してください）');
+          return [upload(m[1], '精算書 ' + u.ref + ' ' + u.payerName, u.issueDate)];
+        }
+      };
+    });
+  } else {
+    units = pending.map(function (r) {
+      var date = String(r.paymentDate).replace(/\//g, '-');
+      return {
+        ref: r.id, issueDate: date, records: [r],
+        details: function () { return [detailFor(r.accountItem, r.freeeAccountItem, r.taxRateLabel, r.invoiceType, r.department, r.amount, freee_memo_(r))]; },
+        receipts: function () {
+          return util_list_(r.receiptFileIds).map(function (fileId) { return upload(fileId, r.id + ' ' + (r.vendor || ''), date); });
+        }
+      };
+    });
+  }
+
   var batch = 'API-' + Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss');
   var results = [];
   var started = Date.now();
-
-  for (var i = 0; i < targets.length && i < batchSize; i++) {
+  for (var i = 0; i < units.length && i < 20; i++) {
     if (Date.now() - started > 4.5 * 60 * 1000) break;
-    var r = targets[i];
+    var u = units[i];
     try {
-      var acc = accounts.filter(function (a) { return a.label === r.accountItem || a.freeeName === r.freeeAccountItem; })[0];
-      if (!acc || !acc.freeeId) throw new Error('勘定科目IDが未設定です（マスタ同期を実行してください）');
-      var tax = taxes.filter(function (t) { return t.label === r.taxRateLabel; })[0];
-      if (!tax) throw new Error('税区分が見つかりません');
-      var qualified = r.invoiceType ? r.invoiceType === INVOICE_QUALIFIED : true;
-      var taxCode = qualified ? tax.freeeCode : (tax.freeeCodeNonQualified !== '' ? tax.freeeCodeNonQualified : tax.freeeCode);
-      if (taxCode === '' || taxCode == null) throw new Error('税区分コードが未設定です（マスタ同期を実行してください）');
-      var section = sections.filter(function (x) { return x.name === r.department; })[0];
-
-      // 証憑（領収書）のアップロード
-      var receiptIds = [];
-      util_list_(r.receiptFileIds).forEach(function (fileId) {
-        var blob = DriveApp.getFileById(fileId).getBlob();
-        var up = freee_fetch_('post', '/api/1/receipts', {
-          form: { company_id: String(companyId), receipt: blob, description: r.id + ' ' + (r.vendor || ''), issue_date: String(r.paymentDate).replace(/\//g, '-') }
-        });
-        receiptIds.push(up.receipt.id);
-      });
-
-      var detail = {
-        account_item_id: Number(acc.freeeId),
-        tax_code: Number(taxCode),
-        amount: Number(r.amount),
-        description: freee_memo_(r).slice(0, 250)
-      };
-      if (section) detail.section_id = section.id;
+      var details = u.details();         // 先に検証してから証憑をアップロード
+      var receiptIds = u.receipts();
       var deal = freee_fetch_('post', '/api/1/deals', {
-        json: {
-          company_id: companyId,
-          issue_date: String(r.paymentDate).replace(/\//g, '-'),
-          type: 'expense',
-          ref_number: r.id,
-          details: [detail],
-          receipt_ids: receiptIds
-        }
+        json: { company_id: companyId, issue_date: u.issueDate, type: 'expense', ref_number: u.ref, details: details, receipt_ids: receiptIds }
       }).deal;
-
-      records_update_(c.sheet, r.id, {
-        status: STATUS.EXPORTED, freeeDealId: deal.id, freeeReceiptIds: receiptIds.join('\n'),
-        freeeExportedAt: new Date(), freeeExportBatch: batch
+      u.records.forEach(function (r) {
+        records_update_(c.sheet, r.id, {
+          status: STATUS.EXPORTED, freeeDealId: deal.id, freeeReceiptIds: receiptIds.join('\n'),
+          freeeExportedAt: new Date(), freeeExportBatch: batch
+        });
       });
-      results.push({ id: r.id, ok: true, dealId: deal.id });
+      results.push({ id: u.ref, ok: true, dealId: deal.id, count: u.records.length });
     } catch (e) {
-      results.push({ id: r.id, ok: false, error: String(e.message || e) });
+      results.push({ id: u.ref, ok: false, error: String(e.message || e) });
     }
   }
-  log_write_(c.ss, who, 'freee API登録', batch + ' 成功' + results.filter(function (x) { return x.ok; }).length + '件');
-  return { results: results, remaining: Math.max(0, targets.length - results.length) };
+  log_write_(c.ss, who, 'freee API登録', batch + '（' + grouping + '）成功' + results.filter(function (x) { return x.ok; }).length + '件');
+  return { results: results, remaining: Math.max(0, units.length - results.length), grouping: grouping };
 }

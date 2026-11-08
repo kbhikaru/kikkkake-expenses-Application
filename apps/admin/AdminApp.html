@@ -130,6 +130,7 @@
         $('rFrom').value = ymd(new Date(now.getFullYear(), now.getMonth() - 2, 1));
         $('fFrom').value = ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1));
         $('fTo').value = ymd(new Date(now.getFullYear(), now.getMonth(), 0));
+        $('fMonth').value = $('sMonth').value = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
       }
       openTab(currentTab);
     }).catch(function (err) { busy(false); if (S.token) showLogin(err.message); });
@@ -141,6 +142,7 @@
   var loaders = {
     dashboard: loadDashboard,
     records: loadRecords,
+    statements: loadStatements,
     freee: loadFreee,
     form: function () { return loadConfig().then(renderFieldEditor); },
     masters: function () { return loadConfig().then(renderMaster); },
@@ -428,6 +430,7 @@
       el('span', { text: 'freee：' + (r.freeeAccountItem || '') + '／' + (r.freeeTaxName || '') + (r.department ? '／部門 ' + r.department : '') }),
       el('span', { text: '税抜 ' + yen(r.netAmount) + '／消費税 ' + yen(r.taxAmount) }),
       r.reviewer ? el('span', { text: '承認者：' + r.reviewer + '（' + r.reviewedAt + '）' }) : null,
+      r.statementId ? el('span', {}, ['精算書：' + r.statementId + ' ', r.statementUrl ? el('a', { href: r.statementUrl, target: '_blank', rel: 'noopener', text: 'PDF' }) : null]) : null,
       r.freeeExportBatch ? el('span', { text: 'freee出力：' + r.freeeExportBatch + (r.freeeDealId ? '（取引ID ' + r.freeeDealId + '）' : '') }) : null,
       extra ? el('span', { text: 'その他：' + extra }) : null
     ]));
@@ -457,9 +460,89 @@
     $('modal').hidden = false;
   }
 
+  /* ================= 月次精算書 ================= */
+
+  function loadStatements() {
+    previewStatement();
+    return loadStatementAuto();
+  }
+
+  function previewStatement() {
+    var m = $('sMonth').value;
+    if (!m) return;
+    api('api_statementPreview', m).then(function (p) {
+      var box = $('sPreview');
+      box.hidden = false;
+      box.className = 'result';
+      box.textContent = Number(m.slice(5)) + '月分（' + p.basis + '基準）：' + p.payers + '名・' + p.count + '件・' + yen(p.total) +
+        (p.pending ? '\n⚠️ 未承認（申請中）が ' + p.pending + ' 件あります' + (p.includePending ? '（精算書に含めます）' : '（精算書には含まれません。先に承認してください）') : '') +
+        (p.existing ? '\n作成済みの精算書があります。作成すると上書きされます。' : '');
+      $('sGenerate').disabled = !p.count;
+    }).catch(fail);
+  }
+  $('sMonth').addEventListener('change', previewStatement);
+
+  $('sGenerate').addEventListener('click', function () {
+    var m = $('sMonth').value;
+    if (!confirm(Number(m.slice(5)) + '月分の精算書を作成します。よろしいですか？')) return;
+    busy(true);
+    api('api_generateStatements', m).then(function (res) {
+      busy(false);
+      toast(res.label + '分の精算書を作成しました');
+      var box = $('sResult');
+      box.hidden = false;
+      box.innerHTML = '';
+      box.appendChild(el('div', { class: 'result result--ok' }, [
+        res.statements.length + '名・' + res.count + '件・' + yen(res.total) + '\n',
+        el('a', { href: res.spreadsheetUrl, target: '_blank', rel: 'noopener', text: '一覧（スプレッドシート）' }), '　',
+        el('a', { href: res.summaryPdfUrl, target: '_blank', rel: 'noopener', text: '一覧PDF' }), '　',
+        el('a', { href: res.folderUrl, target: '_blank', rel: 'noopener', text: '月フォルダを開く' })
+      ]));
+      var t = el('table', { class: 'table' }, [el('thead', {}, [el('tr', {}, [
+        el('th', { text: '支払者' }), el('th', { class: 'num', text: '件数' }), el('th', { class: 'num', text: '合計' }),
+        el('th', { class: 'num', text: '立替精算額' }), el('th', { text: '精算書' })
+      ])])]);
+      var tb = el('tbody');
+      res.statements.forEach(function (x) {
+        var dot = el('span', { class: 'dot' }); dot.style.setProperty('--c', catColor(x.category));
+        tb.appendChild(el('tr', {}, [
+          el('td', {}, [dot, x.payerName, el('div', { class: 'muted small', text: x.id })]),
+          el('td', { class: 'num', text: x.count }), el('td', { class: 'num', text: yen(x.total) }),
+          el('td', { class: 'num', text: yen(x.reimburse) }),
+          el('td', {}, [el('a', { href: x.pdfUrl, target: '_blank', rel: 'noopener', text: 'PDF' })])
+        ]));
+      });
+      t.appendChild(tb);
+      box.appendChild(el('div', { class: 'table-wrap' }, [t]));
+      previewStatement();
+    }).catch(fail);
+  });
+
+  function showAuto(st) {
+    $('sAutoStatus').className = 'result ' + (st.enabled ? 'result--ok' : '');
+    $('sAutoStatus').textContent = st.enabled ? '✅ オン：毎月' + st.day + '日に前月分を自動作成' : 'オフ（手動で作成）';
+    $('sAutoToggle').textContent = st.enabled ? '自動作成をオフにする' : '自動作成をオンにする';
+    $('sAutoToggle').dataset.enabled = st.enabled ? '1' : '';
+  }
+  function loadStatementAuto() { return api('api_statementAutoStatus').then(showAuto); }
+  $('sAutoToggle').addEventListener('click', function () {
+    busy(true);
+    api('api_setStatementAuto', !$('sAutoToggle').dataset.enabled).then(function (st) { busy(false); showAuto(st); toast('保存しました'); }).catch(fail);
+  });
+
   /* ================= freee連携 ================= */
 
+  function syncGrouping() {
+    var g = $('fGrouping').value;
+    document.querySelectorAll('[data-group]').forEach(function (x) {
+      x.hidden = x.dataset.group !== (g === '精算書ごと' ? 'statement' : 'record');
+    });
+  }
+  $('fGrouping').addEventListener('change', syncGrouping);
+
   function loadFreee() {
+    if (!loadFreee.inited && S.overview.freeeGrouping) { $('fGrouping').value = S.overview.freeeGrouping; loadFreee.inited = true; }
+    syncGrouping();
     return api('api_freeeStatus').then(function (st) {
       $('redirectUri').textContent = st.redirectUri;
       var box = $('freeeStatus');
@@ -472,7 +555,11 @@
   }
 
   function freeeFilter() {
-    return { from: $('fFrom').value, to: $('fTo').value, category: $('fCategory').value, includeExported: $('fIncludeExported').checked };
+    var grouping = $('fGrouping').value;
+    var f = { grouping: grouping, category: $('fCategory').value, includeExported: $('fIncludeExported').checked };
+    if (grouping === '精算書ごと') f.month = $('fMonth').value;
+    else { f.from = $('fFrom').value; f.to = $('fTo').value; }
+    return f;
   }
 
   $('csvBtn').addEventListener('click', function () {
@@ -486,7 +573,7 @@
       var box = $('csvResult');
       box.className = 'result result--ok';
       box.innerHTML = '';
-      box.appendChild(document.createTextNode(res.count + '件（' + yen(res.total) + '）を出力しました。\n'));
+      box.appendChild(document.createTextNode(res.count + '件（' + yen(res.total) + '）を ' + res.rows + '行（' + res.grouping + '）で出力しました。\n'));
       box.appendChild(el('a', { href: url, download: res.fileName, text: '⬇ CSVをダウンロード' }));
       if (res.url) { box.appendChild(document.createTextNode('　')); box.appendChild(el('a', { href: res.url, target: '_blank', rel: 'noopener', text: 'Driveで開く' })); }
       box.hidden = false;
@@ -535,7 +622,7 @@
     round().then(function () {
       busy(false);
       box.className = 'result ' + (ng.length ? 'result--ng' : 'result--ok');
-      box.textContent = '成功 ' + ok + '件' + (ng.length ? '\n失敗 ' + ng.length + '件：\n' + ng.map(function (x) { return x.id + '：' + x.error; }).join('\n') : '');
+      box.textContent = '登録した取引 ' + ok + '件' + (ng.length ? '\n失敗 ' + ng.length + '件：\n' + ng.map(function (x) { return x.id + '：' + x.error; }).join('\n') : '');
     }).catch(fail);
   });
 
@@ -714,13 +801,17 @@
   /* ================= 設定 ================= */
 
   var SETTING_GROUPS = [
-    ['保存先', ['DATA_SPREADSHEET_ID', 'DATA_SHEET_NAME', 'RECEIPT_FOLDER_ID', 'RECEIPT_SUBFOLDER_MODE', 'RECEIPT_SUBFOLDER_FORMAT', 'MAX_FILE_MB']],
+    ['保存先', ['DATA_SPREADSHEET_ID', 'DATA_SHEET_NAME', 'RECEIPT_FOLDER_ID', 'RECEIPT_SUBFOLDER_MODE', 'RECEIPT_SUBFOLDER_FORMAT', 'RECEIPT_MONTH_BASIS', 'MAX_FILE_MB']],
+    ['月次精算書', ['STATEMENT_INCLUDE_PENDING', 'STATEMENT_AUTO_DAY']],
     ['従業員マスタ', ['EMPLOYEE_SPREADSHEET_ID', 'EMPLOYEE_SHEET_NAME', 'EMPLOYEE_ID_COLUMN', 'EMPLOYEE_NAME_COLUMN', 'EMPLOYEE_DEPT_COLUMN', 'EMPLOYEE_STATUS_COLUMN', 'EMPLOYEE_EXCLUDE_STATUS']],
     ['申請画面・通知', ['APP_TITLE', 'APPLICANT_APP_URL', 'NOTIFY_EMAILS', 'TAX_ROUNDING']],
-    ['freee', ['FREEE_COMPANY_ID', 'FREEE_PARTNER_MODE', 'FREEE_SETTLEMENT_ACCOUNT', 'FREEE_CARD_ACCOUNT', 'FREEE_CASH_ACCOUNT', 'FREEE_CSV_ENCODING']]
+    ['freee', ['FREEE_COMPANY_ID', 'FREEE_PARTNER_MODE', 'FREEE_SETTLEMENT_ACCOUNT', 'FREEE_CARD_ACCOUNT', 'FREEE_CASH_ACCOUNT', 'FREEE_CSV_ENCODING', 'FREEE_GROUPING']]
   ];
   var SETTING_CHOICES = {
-    RECEIPT_SUBFOLDER_MODE: ['なし', '月別', '月別+所属区分'],
+    RECEIPT_SUBFOLDER_MODE: ['なし', '月別', '月別+所属区分', '月別+支払者'],
+    RECEIPT_MONTH_BASIS: ['支払日', '申請日'],
+    STATEMENT_INCLUDE_PENDING: ['いいえ', 'はい'],
+    FREEE_GROUPING: ['精算書ごと', '申請ごと'],
     TAX_ROUNDING: ['切り捨て', '四捨五入', '切り上げ'],
     FREEE_PARTNER_MODE: ['支払先', '支払者', 'なし'],
     FREEE_CSV_ENCODING: ['UTF-8', 'Shift_JIS']
