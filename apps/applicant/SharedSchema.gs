@@ -14,6 +14,7 @@ var SHEETS = {
   ACCOUNTS: '勘定科目マスタ',
   TAXES: '税区分マスタ',
   CATEGORIES: '所属区分マスタ',
+  VENDORS: '支払先マスタ',
   LOG: '操作ログ'
 };
 
@@ -127,6 +128,20 @@ var TABLES = {
       { key: 'departments', label: '対象部署（従業員マスタ）' },
       { key: 'freeeSection', label: 'freee部門' },
       { key: 'color', label: '表示色' },
+      { key: 'order', label: '表示順' },
+      { key: 'enabled', label: '有効' }
+    ]
+  },
+  vendors: {
+    sheet: SHEETS.VENDORS,
+    columns: [
+      { key: 'name', label: '支払先名' },
+      { key: 'keywords', label: '検索キーワード' },
+      { key: 'invoiceNumber', label: '登録番号' },
+      { key: 'accountItem', label: '勘定科目' },
+      { key: 'taxRateLabel', label: '税率' },
+      { key: 'categories', label: '対象所属区分' },
+      { key: 'note', label: 'メモ' },
       { key: 'order', label: '表示順' },
       { key: 'enabled', label: '有効' }
     ]

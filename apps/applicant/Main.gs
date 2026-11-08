@@ -82,6 +82,10 @@ function api_bootstrap() {
       return { label: a.label, categories: a.categories, defaultTax: a.defaultTax };
     }),
     taxes: form_getTaxes_(ss, false).map(function (t) { return { label: t.label, rate: t.rate }; }),
+    vendors: form_getVendors_(ss, false).map(function (v) {
+      return { name: v.name, keywords: v.keywords || '', invoiceNumber: v.invoiceNumber, accountItem: v.accountItem || '',
+        taxRateLabel: v.taxRateLabel || '', categories: v.categories };
+    }),
     employees: employees,
     employeeError: employeeError,
     userEmail: Session.getActiveUser().getEmail() || ''
@@ -133,7 +137,8 @@ function api_submit(payload) {
   var tax = form_getTaxes_(ss, false).filter(function (t) { return t.label === values.taxRateLabel; })[0];
   if (!tax) errors.push('税率を選択してください。');
 
-  if (values.invoiceNumber && !/^T\d{13}$/.test(String(values.invoiceNumber).replace(/[\s-]/g, '').toUpperCase())) {
+  if (values.invoiceNumber) values.invoiceNumber = util_normalizeInvoice_(values.invoiceNumber);
+  if (values.invoiceNumber && !/^T\d{13}$/.test(values.invoiceNumber)) {
     errors.push('登録番号は「T」+13桁の数字で入力してください。');
   }
 
@@ -184,7 +189,7 @@ function api_submit(payload) {
     taxAmount: calc.tax,
     paymentMethod: values.paymentMethod || '',
     invoiceType: values.invoiceType || '',
-    invoiceNumber: values.invoiceNumber ? String(values.invoiceNumber).replace(/[\s-]/g, '').toUpperCase() : '',
+    invoiceNumber: values.invoiceNumber || '',
     description: String(values.description || '').trim(),
     receiptFileIds: saved.map(function (s) { return s.id; }).join('\n'),
     receiptUrls: saved.map(function (s) { return s.url; }).join('\n'),

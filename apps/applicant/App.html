@@ -110,6 +110,7 @@
     list.innerHTML = '';
     state.files = [];
     state.taxTouched = false;
+    state.autoFilled = null;
     $('formErrors').hidden = true;
 
     visibleFields().forEach(function (f) {
@@ -174,7 +175,9 @@
           input = buildDropzone(id);
           break;
         default:
-          input = el('input', { type: 'text', id: id, name: f.key, placeholder: f.placeholder || '', autocomplete: 'off' });
+          input = f.key === 'vendor'
+            ? buildVendorCombo(id, f)
+            : el('input', { type: 'text', id: id, name: f.key, placeholder: f.placeholder || '', autocomplete: 'off' });
       }
       wrap.appendChild(input);
       wrap.appendChild(el('div', { class: 'field__error', hidden: true }));
@@ -226,6 +229,147 @@
     box.appendChild(el('span', {}, ['税込 ', el('strong', { text: yen(amount) })]));
     box.appendChild(el('span', { class: 'muted', text: '税抜 ' + yen(amount - t) + ' ／ 消費税 ' + yen(t) }));
     box.hidden = false;
+  }
+
+  /* ---------- 支払先（よく使う支払先から選ぶと自動入力） ---------- */
+  /** 検索用に表記をそろえる（全角半角・大文字小文字・ひらがな/カタカナ・空白） */
+  function norm(s) {
+    return String(s || '').normalize('NFKC').toLowerCase().replace(/\s/g, '')
+      .replace(/[\u3041-\u3096]/g, function (ch) { return String.fromCharCode(ch.charCodeAt(0) + 0x60); });
+  }
+  function shortAccount(label) { return String(label || '').replace(/（.*$/, ''); }
+  function normInvoice(v) {
+    var s = String(v || '').normalize('NFKC').replace(/[\s\-ー－]/g, '').toUpperCase();
+    return /^\d{13}$/.test(s) ? 'T' + s : s;
+  }
+
+  function vendorsForCategory() {
+    return (state.boot.vendors || []).filter(function (v) { return matchesCategory(v.categories, state.category.name); });
+  }
+
+  function buildVendorCombo(id, f) {
+    var list = vendorsForCategory();
+    var input = el('input', { type: 'text', id: id, name: f.key, placeholder: f.placeholder || '', autocomplete: 'off' });
+    if (!list.length) return input;
+
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-expanded', 'false');
+    input.setAttribute('aria-controls', id + '_list');
+    var ul = el('ul', { class: 'combo__list', id: id + '_list', role: 'listbox', hidden: true });
+    var hint = el('p', { class: 'combo__hint', hidden: true });
+    var items = [], active = -1;
+
+    function render(filter) {
+      var q = norm(filter);
+      items = list.filter(function (v) { return !q || norm(v.name).indexOf(q) >= 0 || norm(v.keywords).indexOf(q) >= 0; }).slice(0, 50);
+      ul.innerHTML = '';
+      items.forEach(function (v, i) {
+        var meta = [shortAccount(v.accountItem), v.invoiceNumber ? 'インボイス登録あり' : ''].filter(String).join(' ・ ');
+        ul.appendChild(el('li', { role: 'option', id: id + '_opt' + i, class: 'combo__item' + (i === active ? ' is-active' : ''),
+          'aria-selected': i === active ? 'true' : 'false',
+          onmousedown: function (e) { e.preventDefault(); choose(v); } }, [
+          el('span', { class: 'combo__name', text: v.name }),
+          meta ? el('span', { class: 'combo__meta', text: meta }) : null
+        ]));
+      });
+      if (!items.length) ul.appendChild(el('li', { class: 'combo__empty', text: '登録済みの支払先にありません（このまま入力できます）' }));
+      if (active >= 0) input.setAttribute('aria-activedescendant', id + '_opt' + active); else input.removeAttribute('aria-activedescendant');
+    }
+    function open(filter) { render(filter); ul.hidden = false; input.setAttribute('aria-expanded', 'true'); }
+    function close() { ul.hidden = true; active = -1; input.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant'); }
+    function choose(v) { input.value = v.name; close(); applyVendor(v, hint); }
+    function exactMatch() {
+      return list.filter(function (v) { return norm(v.name) === norm(input.value); })[0];
+    }
+
+    input.addEventListener('focus', function () { open(input.value); });
+    input.addEventListener('blur', function () { setTimeout(close, 150); });
+    input.addEventListener('input', function () {
+      active = -1;
+      open(input.value);
+      var v = exactMatch();
+      if (v) applyVendor(v, hint); else { hint.hidden = true; clearAutofill(); }
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (ul.hidden) open(input.value);
+        if (!items.length) return;
+        active = e.key === 'ArrowDown' ? (active + 1) % items.length : (active <= 0 ? items.length - 1 : active - 1);
+        render(input.value);
+        var a = $(id + '_opt' + active); if (a) a.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter' && !ul.hidden && active >= 0) {
+        e.preventDefault(); choose(items[active]);
+      } else if (e.key === 'Escape') {
+        close();
+      }
+    });
+    var toggle = el('button', { type: 'button', class: 'combo__toggle', 'aria-label': 'よく使う支払先の一覧を開く', tabindex: '-1',
+      onmousedown: function (e) { e.preventDefault(); },
+      onclick: function () { if (ul.hidden) { input.focus(); open(''); } else close(); } }, ['▼']);
+    return el('div', { class: 'combo' }, [
+      el('div', { class: 'combo__row' }, [input, toggle]),
+      ul,
+      hint
+    ]);
+  }
+
+  /** 支払先を打ち直したら、前の支払先から自動入力した値（手で変えていないもの）を取り消す */
+  function clearAutofill() {
+    var a = state.autoFilled;
+    if (!a) return;
+    var num = $('f_invoiceNumber');
+    if (a.invoiceNumber && num && num.value === a.invoiceNumber) {
+      num.value = '';
+      var r = document.querySelector('input[name="invoiceType"]:checked');
+      if (r) r.checked = false;
+      onRadioChange();
+    }
+    var sel = $('f_accountItem');
+    if (a.accountItem && sel && sel.value === a.accountItem) sel.value = '';
+    state.autoFilled = null;
+    updateCalc();
+  }
+
+  /** 登録済みの支払先から、登録番号・勘定科目・税率を自動入力 */
+  function applyVendor(v, hint) {
+    clearAutofill();
+    state.autoFilled = { invoiceNumber: v.invoiceNumber || '', accountItem: '' };
+    var filled = [];
+    var flash = function (key) {
+      var w = $('wrap_' + key);
+      if (!w) return;
+      w.classList.remove('is-autofilled'); void w.offsetWidth; w.classList.add('is-autofilled');
+    };
+    if (v.invoiceNumber && $('wrap_invoiceType')) {
+      setRadio('invoiceType', state.boot.invoiceQualified);
+      onRadioChange();
+      var num = $('f_invoiceNumber');
+      if (num) num.value = v.invoiceNumber;
+      flash('invoiceType'); flash('invoiceNumber');
+      filled.push('登録番号');
+    }
+    var sel = $('f_accountItem');
+    if (v.accountItem && sel && Array.prototype.some.call(sel.options, function (o) { return o.value === v.accountItem; })) {
+      sel.value = v.accountItem;
+      state.autoFilled.accountItem = v.accountItem;
+      flash('accountItem');
+      filled.push('勘定科目');
+      if (!v.taxRateLabel && !state.taxTouched) {
+        var acc = state.boot.accounts.filter(function (a) { return a.label === v.accountItem; })[0];
+        if (acc && acc.defaultTax) setRadio('taxRateLabel', acc.defaultTax);
+      }
+    }
+    if (v.taxRateLabel && document.querySelector('input[name="taxRateLabel"][value="' + CSS.escape(v.taxRateLabel) + '"]')) {
+      setRadio('taxRateLabel', v.taxRateLabel);
+      state.taxTouched = true;
+      flash('taxRateLabel');
+      filled.push('税率');
+    }
+    updateCalc();
+    hint.textContent = '★ 登録済みの支払先です' + (filled.length ? '。' + filled.join('・') + 'を自動で入力しました（変更できます）' : '');
+    hint.hidden = false;
   }
 
   /* ---------- 領収書アップロード ---------- */
@@ -342,7 +486,8 @@
       var a = parseAmount(values.amount);
       if (!(a > 0) || Math.floor(a) !== a) errors.amount = '1円以上の整数で入力してください';
     }
-    if (values.invoiceNumber && !/^T\d{13}$/.test(values.invoiceNumber.replace(/[\s-]/g, '').toUpperCase())) {
+    if (values.invoiceNumber) values.invoiceNumber = normInvoice(values.invoiceNumber);
+    if (values.invoiceNumber && !/^T\d{13}$/.test(values.invoiceNumber)) {
       errors.invoiceNumber = '「T」+13桁の数字で入力してください';
     }
     return errors;

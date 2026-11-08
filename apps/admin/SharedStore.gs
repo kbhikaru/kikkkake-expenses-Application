@@ -145,6 +145,7 @@ function schema_ensureAll_(ss) {
   ensure(TABLES.categories, DEFAULT_CATEGORIES.map(function (c, i) {
     return [c[0], c[1], c[2], c[3], c[4], (i + 1) * 10, true];
   }));
+  ensure(TABLES.vendors, null);
   ensure(TABLES.log, null);
   records_getSheet_(ss, settings_get_(ss));
   return created;
@@ -213,6 +214,24 @@ function form_getCategories_(ss, includeDisabled) {
     c.enabled = util_toBool_(c.enabled);
     return c;
   }).filter(function (c) { return includeDisabled || c.enabled; }).sort(sortByOrder_);
+}
+
+/** 支払先マスタ（よく使う支払先。申請画面で選ぶと登録番号・勘定科目・税率を自動入力） */
+function form_getVendors_(ss, includeDisabled) {
+  return table_read_(ss, TABLES.vendors).map(function (v) {
+    v.name = String(v.name || '').trim();
+    v.enabled = v.enabled === '' || v.enabled == null ? true : util_toBool_(v.enabled);
+    v.categories = util_list_(v.categories || 'ALL');
+    v.invoiceNumber = util_normalizeInvoice_(v.invoiceNumber);
+    return v;
+  }).filter(function (v) { return v.name && (includeDisabled || v.enabled); }).sort(sortByOrder_);
+}
+
+/** 登録番号の表記ゆれをそろえる（全角・ハイフン・空白を除去、先頭Tを大文字に） */
+function util_normalizeInvoice_(v) {
+  var s = String(v == null ? '' : v).normalize('NFKC').replace(/[\s\-ー－]/g, '').toUpperCase();
+  if (/^\d{13}$/.test(s)) s = 'T' + s;
+  return s;
 }
 
 function matchesCategory_(list, category) {
