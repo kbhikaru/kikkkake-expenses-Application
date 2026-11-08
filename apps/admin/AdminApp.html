@@ -157,10 +157,38 @@
   }
   document.querySelectorAll('.tab').forEach(function (t) { t.addEventListener('click', function () { openTab(t.dataset.tab); }); });
 
-  function loadConfig() {
+  /** 設定・マスタは一度読んだら保持（保存したときだけ読み直す） */
+  function loadConfig(force) {
+    if (S.config && !force) return Promise.resolve(S.config);
     busy(true);
     return api('api_getConfig').then(function (cfg) { S.config = cfg; busy(false); return cfg; });
   }
+
+  /**
+   * 一覧・集計の表示を速くする：前に読んだ結果があれば即表示し、裏で最新化。
+   * 内容が変わっていたときだけ描き直す。force=true なら待ってから表示。
+   */
+  S.cache = {};
+  function cachedLoad(fn, params, render, force) {
+    var key = fn + JSON.stringify(params);
+    var hit = S.cache[key];
+    if (hit && !force) {
+      render(hit.data);
+      return api(fn, params).then(function (d) {
+        var text = JSON.stringify(d);
+        S.cache[key] = { data: d, text: text };
+        if (text !== hit.text) render(d);
+      });
+    }
+    busy(true);
+    return api(fn, params).then(function (d) {
+      busy(false);
+      S.cache[key] = { data: d, text: JSON.stringify(d) };
+      render(d);
+    });
+  }
+  /** データを変更したら、保持している一覧・集計を捨てる */
+  function invalidate() { S.cache = {}; }
 
   /* ================= ダッシュボード ================= */
 
@@ -183,9 +211,7 @@
   });
 
   function loadDashboard() {
-    busy(true);
-    return api('api_dashboard', { from: $('dFrom').value, to: $('dTo').value, category: $('dCategory').value }).then(function (d) {
-      busy(false);
+    return cachedLoad('api_dashboard', { from: $('dFrom').value, to: $('dTo').value, category: $('dCategory').value }, function (d) {
       renderKpis(d);
       renderMonthly(d);
       renderAccount(d);
@@ -306,16 +332,14 @@
   $('rQuery').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadRecords().catch(fail); });
   ['rFrom', 'rTo', 'rCategory', 'rStatus'].forEach(function (id) { $(id).addEventListener('change', function () { loadRecords().catch(fail); }); });
 
-  function loadRecords() {
-    busy(true);
-    return api('api_listRecords', { from: $('rFrom').value, to: $('rTo').value, category: $('rCategory').value, status: $('rStatus').value, q: $('rQuery').value })
-      .then(function (res) {
-        busy(false);
+  function loadRecords(force) {
+    return cachedLoad('api_listRecords', { from: $('rFrom').value, to: $('rTo').value, category: $('rCategory').value, status: $('rStatus').value, q: $('rQuery').value },
+      function (res) {
         S.records = res.rows;
         S.selected = {};
         $('rSummary').textContent = res.rows.length + '件 ／ 合計 ' + yen(res.total) + (res.truncated ? '（1000件まで表示）' : '');
         renderRecordTable();
-      });
+      }, force);
   }
 
   function updateBulk() {
@@ -372,12 +396,12 @@
     }
     busy(true);
     return api('api_setStatus', ids, status, comment).then(function (n) {
-      busy(false); toast(n + '件を「' + status + '」にしました'); return true;
+      busy(false); invalidate(); toast(n + '件を「' + status + '」にしました'); return true;
     });
   }
-  $('bulkApprove').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '承認済').then(function (ok) { if (ok) return loadRecords(); }).catch(fail); });
-  $('bulkReject').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '差戻し').then(function (ok) { if (ok) return loadRecords(); }).catch(fail); });
-  $('bulkPending').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '申請中').then(function (ok) { if (ok) return loadRecords(); }).catch(fail); });
+  $('bulkApprove').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '承認済').then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
+  $('bulkReject').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '差戻し').then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
+  $('bulkPending').addEventListener('click', function () { changeStatus(Object.keys(S.selected), '申請中').then(function (ok) { if (ok) return loadRecords(true); }).catch(fail); });
 
   /* ---------- 詳細モーダル ---------- */
   function closeModal() { $('modal').hidden = true; }
@@ -440,7 +464,7 @@
       Object.keys(inputs).forEach(function (k) { v[k] = inputs[k].value; });
       return v;
     }
-    function after() { closeModal(); return loadRecords(); }
+    function after() { closeModal(); invalidate(); return loadRecords(true); }
     body.appendChild(el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn', text: '修正内容を保存', onclick: function () {
         busy(true);
@@ -487,6 +511,7 @@
     if (!confirm(Number(m.slice(5)) + '月分の精算書を作成します。よろしいですか？')) return;
     busy(true);
     api('api_generateStatements', m).then(function (res) {
+      invalidate();
       busy(false);
       toast(res.label + '分の精算書を作成しました');
       var box = $('sResult');
@@ -567,6 +592,7 @@
     f.markExported = $('fMark').checked;
     busy(true);
     api('api_freeeExportCsv', f).then(function (res) {
+      invalidate();
       busy(false);
       var bytes = Uint8Array.from(atob(res.base64), function (c) { return c.charCodeAt(0); });
       var url = URL.createObjectURL(new Blob([bytes], { type: 'text/csv' }));
@@ -611,6 +637,7 @@
     function round() {
       box.textContent = '登録中… 成功 ' + ok + '件';
       return api('api_freeeSendDeals', freeeFilter()).then(function (res) {
+        invalidate();
         var success = res.results.filter(function (x) { return x.ok; }).length;
         ok += success;
         ng = ng.concat(res.results.filter(function (x) { return !x.ok; }));
@@ -826,7 +853,8 @@
     busy(true);
     api('api_saveMaster', S.master, S.masterRows).then(function () {
       toast('保存しました');
-      return Promise.all([loadConfig(), api('api_overview')]);
+      invalidate();
+      return Promise.all([loadConfig(true), api('api_overview')]);
     }).then(function (res) { S.overview = res[1]; busy(false); renderMaster(); }).catch(fail);
   });
 
@@ -874,7 +902,7 @@
     Object.keys(S.settingInputs).forEach(function (k) { patch[k] = S.settingInputs[k].value; });
     busy(true);
     api('api_saveSettings', patch).then(function () {
-      busy(false); toast('設定を保存しました'); return start();
+      busy(false); toast('設定を保存しました'); S.config = null; invalidate(); return start();
     }).catch(fail);
   });
   $('testBtn').addEventListener('click', function () {
