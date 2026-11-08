@@ -23,7 +23,8 @@ var STATUS = {
   PENDING: '申請中',
   APPROVED: '承認済',
   REJECTED: '差戻し',
-  EXPORTED: 'freee連携済'
+  EXPORTED: 'freee連携済',
+  ARCHIVED: 'アーカイブ'   // 誤申請などを集計から外す（削除はせず、いつでも元に戻せる）
 };
 
 /**
@@ -65,6 +66,10 @@ var RECORD_COLUMNS = [
   { key: 'freeeExportBatch', label: 'freee出力バッチ' },
   { key: 'statementId', label: '精算書番号' },
   { key: 'statementUrl', label: '精算書URL' },
+  { key: 'statusBeforeArchive', label: 'アーカイブ前ステータス' },
+  { key: 'archivedAt', label: 'アーカイブ日時' },
+  { key: 'archivedBy', label: 'アーカイブ実行者' },
+  { key: 'archiveReason', label: 'アーカイブ理由' },
   { key: 'extra', label: 'カスタム項目(JSON)' },
   { key: 'updatedAt', label: '更新日時' }
 ];
