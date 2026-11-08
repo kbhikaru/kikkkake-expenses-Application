@@ -251,6 +251,7 @@ function api_saveSettings(token, patch) {
   // 保存前に接続確認（誤ったIDで申請が止まるのを防ぐ）
   var problems = checkSettings_(Object.assign({}, settings_get_(ss), clean));
   if (problems.length) throw new Error(problems.join('\n'));
+  clean.CONFIG_VERSION = String(Date.now()); // 申請画面のキャッシュを更新させる
   settings_set_(ss, clean);
   log_write_(ss, who, '設定変更', Object.keys(clean).join(','));
   return true;
@@ -363,6 +364,7 @@ function api_saveFields(token, fields) {
     }
   });
   table_replaceAll_(ss, TABLES.fields, rows);
+  settings_set_(ss, { CONFIG_VERSION: String(Date.now()) });
   log_write_(ss, who, 'フォーム項目変更', rows.length + '項目');
   return form_getFields_(ss, true);
 }
@@ -403,6 +405,7 @@ function api_saveMaster(token, name, rows) {
   });
   if (!clean.length && name !== 'vendors') throw new Error('1件以上登録してください');
   table_replaceAll_(ss, def, clean);
+  settings_set_(ss, { CONFIG_VERSION: String(Date.now()) });
   log_write_(ss, who, 'マスタ変更:' + def.sheet, clean.length + '件');
   return true;
 }
